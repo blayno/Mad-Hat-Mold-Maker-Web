@@ -60,3 +60,11 @@ fails to install, run this in Command Prompt from the extracted folder:
     py app.py
 
 Then open http://127.0.0.1:5000 manually.
+
+
+
+Python can be found here
+https://github.com/coatl-dev/python3.12-windows 
+
+Files that arent watertight and need repair
+https://3dbuilder.org/
