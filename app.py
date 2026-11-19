@@ -139,16 +139,20 @@ def generate():
     try:
         gen=MoldGenerator(); gen.source=S.generator.source.copy()
         style=d.get('style','multi')
+        want_core=bool(d.get('core',False))
         if style=='flat':
+            if want_core: gen.warnings.append('Core: not available for 2D flat pour moulds, so it was skipped.')
             gen.generate_flat_2d(wall=float(d.get('wall',8)),base=float(d.get('base',6)),
                 top_extra=float(d.get('top_extra',8)),margin=float(d.get('margin',10)))
         else:
             gen.generate(panels=int(d.get('panels',4)),top_extra=float(d.get('top_extra',8)),
                 wall=float(d.get('wall',8)),base=float(d.get('base',6)),
                 clearance=float(d.get('clearance',3)),fill_diameter=float(d.get('fill_diameter',12)),
-                fill_depth=float(d.get('fill_depth',20)))
+                fill_depth_percent=float(d.get('fill_depth_percent',50)),core=want_core,
+                rim_width=float(d.get('rim_width',2.5)),
+                rim_thickness=float(d.get('rim_thickness',1.5)))
         S.generator=gen; S.generated=True
-        return jsonify({'ok':True,'parts':[p.name for p in gen.parts],
+        return jsonify({'ok':True,'parts':[p.name for p in gen.parts],'warnings':list(gen.warnings),
             'capacity':{'gap_ml':gen.cavity_volume_mm3/1000,'channel_ml':gen.pour_channel_volume_mm3/1000,
               'total_ml':gen.total_resin_volume_mm3/1000,'mix_ml':gen.total_resin_volume_mm3*1.1/1000}})
     except Exception as e:
@@ -180,17 +184,38 @@ def preview_part(index):
     if not S.generated or index>=len(S.generator.parts): abort(404)
     return send_file(io.BytesIO(mesh_bytes(S.generator.parts[index].mesh)),mimetype='model/stl',download_name='Part_Preview.stl')
 
+def base_and_source_mesh():
+    """Return the mould base and positioned source STL as one export mesh.
+
+    The flat 2D mould is already a single tray mesh with the source fused in,
+    so it must not be combined a second time.
+    """
+    if not S.generated or not S.generator.parts:
+        abort(404)
+    if len(S.generator.parts) == 1:
+        return S.generator.parts[0].mesh.copy()
+    base = next((p.mesh for p in S.generator.parts if p.name == 'Mold_Base'), None)
+    if base is None or S.generator.plug is None:
+        abort(404)
+    combined = trimesh.util.concatenate([base.copy(), S.generator.plug.copy()])
+    combined.remove_unreferenced_vertices()
+    combined.fix_normals()
+    return combined
+
 @app.get('/api/export/part/<int:index>')
 def export_part(index):
     if not S.generated or index>=len(S.generator.parts): abort(404)
-    data=mesh_bytes(S.generator.parts[index].mesh,True)
-    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name=S.generator.parts[index].name+'.stl')
+    part = S.generator.parts[index]
+    mesh = base_and_source_mesh() if part.name == 'Mold_Base' else part.mesh.copy()
+    data=mesh_bytes(mesh,True)
+    filename = 'Mold_Base_and_STL.stl' if part.name == 'Mold_Base' else part.name+'.stl'
+    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name=filename)
 
 @app.get('/api/export/plug')
 def export_plug():
     if not S.generated or S.generator.plug is None: abort(404)
-    data=mesh_bytes(S.generator.plug,True)
-    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name='Located_Original_Plug.stl')
+    data=mesh_bytes(base_and_source_mesh(),True)
+    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name='Mold_Base_and_STL.stl')
 
 @app.get('/api/export/zip')
 def export_zip():
@@ -200,9 +225,15 @@ def export_zip():
     buff=io.BytesIO()
     with zipfile.ZipFile(buff,'w',zipfile.ZIP_DEFLATED) as zf:
         for i,p in enumerate(S.generator.parts):
-            mesh=p.mesh.copy()
-            if i: mesh.apply_translation(np.array(p.direction)*dist)
-            zf.writestr(p.name+'.stl',transform_to_export(mesh).export(file_type='stl'))
+            if p.name == 'Mold_Base':
+                mesh = base_and_source_mesh()
+                filename = 'Mold_Base_and_STL.stl'
+            else:
+                mesh = p.mesh.copy()
+                filename = p.name+'.stl'
+            if i and amount:
+                mesh.apply_translation(np.array(p.direction)*dist)
+            zf.writestr(filename,transform_to_export(mesh).export(file_type='stl'))
     buff.seek(0)
     return send_file(buff,mimetype='application/zip',as_attachment=True,download_name='Mad_Hat_Mold_Parts.zip')
 

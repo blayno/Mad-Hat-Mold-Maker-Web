@@ -150,7 +150,7 @@ def profile_radius(profile, angle, y, outer=False):
     return float(r0 * (1-yt) + r1 * yt)
 
 
-def offset_model(mesh, clearance):
+def offset_model(mesh, clearance, return_fields=False):
     """Build a robust outward offset using a filled voxel distance field.
 
     Vertex-normal offsets can fold over on dense, highly curved meshes.  A
@@ -208,6 +208,14 @@ def offset_model(mesh, clearance):
             raise RuntimeError(
                 "The volumetric cavity offset did not produce a valid closed solid."
             )
+        if return_fields:
+            fields = {
+                "padded": padded,                      # filled source voxels
+                "offset_volume": offset_volume,        # source + clearance
+                "pitch": float(pitch),
+                "origin": grid_origin - pad * pitch,   # world pos of voxel [0,0,0]
+            }
+            return out, fields
         return out
     except Exception as exc:
         raise RuntimeError(
@@ -321,6 +329,117 @@ def contoured_clip_flange(profile, angle, y_min, y_max, base_top,
     return flange
 
 
+def flange_seal_ring(angle, profile, y_min, y_max, base_top,
+                     clearance=0.0, wall=8.0, projection=12.0,
+                     tangential_face=0.0, rim_width=2.5, rim_thickness=1.5,
+                     grow=0.0, segments=64, sides=12,
+                     line_y_min=None, line_y_max=None):
+    """Create one rounded sealing bead along the flange centreline.
+
+    The bead runs vertically between the two locating-pin/socket centres,
+    following the changing radial contour of the flange.  It is deliberately
+    a single line, not a closed perimeter loop.
+    """
+    cord_radius = max(0.15, (float(rim_thickness) + 2.0 * grow) / 2.0)
+    y0 = float(y_min if line_y_min is None else line_y_min)
+    y1 = float(y_max if line_y_max is None else line_y_max)
+    if y1 <= y0:
+        return None
+
+    ys = np.linspace(y0, y1, max(8, int(segments)) + 1)
+    outer_wall_reserve = max(5.0, wall * 0.55)
+    # Place the single bead halfway across the flange projection, between
+    # the inner flange root and its outer edge.
+    radii = []
+    for y in ys:
+        source_y = float(np.clip(y - base_top, 0, profile["height"]))
+        panel_outer = (
+            profile_radius(profile, angle, source_y, True)
+            + max(0.0, clearance) + wall + outer_wall_reserve
+        )
+        radii.append(panel_outer + max(0.0, projection) * 0.5)
+
+    path = np.column_stack([np.asarray(radii, dtype=float), ys])
+    verts, faces = [], []
+    for i, (r, y) in enumerate(path):
+        if i == 0:
+            direction = path[1] - path[0]
+        elif i == len(path) - 1:
+            direction = path[-1] - path[-2]
+        else:
+            direction = path[i + 1] - path[i - 1]
+        length = float(np.linalg.norm(direction))
+        if length < 1e-10:
+            direction = np.array([0.0, 1.0])
+            length = 1.0
+        direction /= length
+        normal = np.array([-direction[1], direction[0]])
+        for j in range(sides):
+            a = 2.0 * math.pi * j / sides
+            rr = r + cord_radius * math.cos(a) * normal[0]
+            yy = y + cord_radius * math.cos(a) * normal[1]
+            tt = tangential_face + cord_radius * math.sin(a)
+            verts.append([rr, yy, tt])
+
+    for i in range(len(path) - 1):
+        for j in range(sides):
+            nj = (j + 1) % sides
+            a = i * sides + j
+            b = i * sides + nj
+            c = (i + 1) * sides + nj
+            d = (i + 1) * sides + j
+            faces.extend([[a, b, d], [b, c, d]])
+    # Close both ends of the bead with triangular fans.
+    for j in range(1, sides - 1):
+        faces.append([0, j + 1, j])
+    last = (len(path) - 1) * sides
+    for j in range(1, sides - 1):
+        faces.append([last, last + j, last + j + 1])
+
+    bead = trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                           faces=np.asarray(faces, dtype=np.int64), process=True)
+    radial = np.array([math.sin(angle), 0.0, math.cos(angle)])
+    tangent = np.array([math.cos(angle), 0.0, -math.sin(angle)])
+    transform = np.eye(4)
+    transform[:3, 0] = radial
+    transform[:3, 1] = [0.0, 1.0, 0.0]
+    transform[:3, 2] = tangent
+    bead.apply_transform(transform)
+    bead.fix_normals()
+    return bead
+
+
+def base_tab_ring(profile, y_center, height, projection, clearance,
+                  root=1.0, grow=0.0, segments=192):
+    """Closed rectangular ring around the base's outer edge.
+
+    Its root sinks `root` mm into the base disc and it sticks out `projection`
+    mm past the disc edge, centred vertically on `y_center`.  With grow > 0 it
+    is enlarged (used as the matching groove cutter for the wall panels).
+    """
+    h = height + 2 * grow
+    y0 = y_center - h / 2
+    verts = []
+    for i in range(segments):
+        ang = i / segments * 2 * np.pi
+        edge = max(1.0, profile_radius(profile, ang, 0) + clearance - 0.2)   # base disc edge
+        for r, y in ((edge - root, y0), (edge + projection + grow, y0),
+                     (edge + projection + grow, y0 + h), (edge - root, y0 + h)):
+            verts.append([math.sin(ang) * r, y, math.cos(ang) * r])
+    faces = []
+    for i in range(segments):
+        n = (i + 1) % segments
+        for k in range(4):
+            nk = (k + 1) % 4
+            a_, b_ = i * 4 + k, i * 4 + nk
+            c_, d_ = n * 4 + nk, n * 4 + k
+            faces.extend([[a_, b_, d_], [b_, c_, d_]])
+    ring = trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                           faces=np.asarray(faces, dtype=np.int64), process=True)
+    ring.fix_normals()
+    return ring
+
+
 def radial_prism(profile, y0, y1, clearance, subtract=0.2, count=192):
     verts, faces = [], []
     for y in (y0, y1):
@@ -337,6 +456,160 @@ def radial_prism(profile, y0, y1, clearance, subtract=0.2, count=192):
     out=trimesh.Trimesh(vertices=np.asarray(verts),faces=np.asarray(faces),process=True)
     out.fix_normals()
     return out
+
+
+
+def _mask_to_mesh(mask, pitch, origin):
+    """Marching-cubes a boolean voxel mask into a closed mesh (world coords)."""
+    from skimage import measure
+    vol = np.pad(mask, 1, mode="constant", constant_values=False).astype(np.float32)
+    verts, faces, _n, _v = measure.marching_cubes(vol, level=0.5,
+                                                  spacing=(pitch, pitch, pitch))
+    verts = verts + np.asarray(origin, dtype=float) - pitch
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    mesh.fix_normals()
+    return mesh
+
+
+def core_voxels(fields, top_y, fill_diameter, cap_height=3.0):
+    """Voxel-side core logic (no Boolean engine needed).
+
+    Finds cavities that are enclosed sideways but open upwards (cup / bowl /
+    vase interiors), shrinks them by the silicone clearance, extends them
+    straight up to the mould top as a stem, and works out where the pour hole
+    and the retaining cap go.  Returns a dict, or None plus warnings.
+    """
+    from scipy import ndimage
+
+    padded = fields["padded"]
+    offset = fields["offset_volume"]
+    pitch = fields["pitch"]
+    origin = np.asarray(fields["origin"], dtype=float)
+    warnings = []
+
+    # 1. Pockets: empty voxels that are enclosed within their own horizontal
+    #    (X/Z) slice.  Connectivity is restricted to the slice plane so a cup's
+    #    interior counts even though it is open at the top.
+    struct = np.zeros((3, 3, 3), dtype=bool)
+    struct[:, 1, :] = ndimage.generate_binary_structure(2, 1)
+    filled = ndimage.binary_fill_holes(padded, structure=struct)
+    pocket = filled & ~padded
+
+    # The core is the pocket minus the silicone gap (the cutter's offset).
+    raw = pocket & ~offset
+    if not raw.any():
+        warnings.append("Core: no open cavity found in the model, so no core was made.")
+        return None, warnings
+
+    # 2. Which voxels can see the sky (nothing of the cutter above them)?
+    blocked_above = np.flip(np.cumsum(np.flip(offset, axis=1), axis=1, dtype=np.int32), axis=1)
+    sky = raw & (blocked_above == 0)
+
+    labels, n = ndimage.label(raw)
+    sizes = np.bincount(labels[raw], minlength=n + 1)
+    sky_counts = np.bincount(labels[sky], minlength=n + 1)
+    candidates = [l for l in range(1, n + 1) if sky_counts[l] > 0 and sizes[l] > 0]
+    if not candidates:
+        warnings.append("Core: the cavity is not open at the top (rotate the model so the "
+                        "opening faces up), so no core was made.")
+        return None, warnings
+    chosen = max(candidates, key=lambda l: sizes[l])
+    if len(candidates) > 1:
+        warnings.append(f"Core: {len(candidates)} separate open cavities found; only the "
+                        "largest was cored.")
+    core = labels == chosen
+    undercut = 1.0 - sky_counts[chosen] / float(sizes[chosen])
+    if undercut > 0.02:
+        warnings.append(f"Core: about {undercut*100:.0f}% of the core sits under an overhang "
+                        "(cavity wider than its opening). It will not pull out upwards in one piece.")
+
+    # 3. Stem: extrude every unobstructed column straight up to the mould top.
+    k_target = int(math.ceil((top_y + 0.5 - origin[1]) / pitch))
+    if k_target >= core.shape[1]:
+        core = np.pad(core, ((0, 0), (0, k_target + 1 - core.shape[1]), (0, 0)))
+        blocked_above = np.pad(blocked_above, ((0, 0), (0, k_target + 1 - blocked_above.shape[1]), (0, 0)))
+    ny = core.shape[1]
+    has_core = core.any(axis=1)
+    top_idx = ny - 1 - np.argmax(core[:, ::-1, :], axis=1)
+    top_free = np.take_along_axis(blocked_above, top_idx[:, None, :], axis=1)[:, 0, :] == 0
+    open_cols = has_core & top_free
+    ys = np.arange(ny)[None, :, None]
+    stem = open_cols[:, None, :] & (ys > top_idx[:, None, :]) & (ys <= k_target)
+    core_full = core | stem
+
+    stem2d = core_full[:, k_target, :]
+    if not stem2d.any():
+        warnings.append("Core: could not extend the core to the top of the mould.")
+        return None, warnings
+
+    # 4. Pour hole through the core: on the axis if there is room, else at the
+    #    widest part of the stem.
+    edt = ndimage.distance_transform_edt(stem2d) * pitch
+    wall = 2.0
+    r_want = max(1.0, float(fill_diameter) / 2.0)
+    i0 = int(round((0.0 - origin[0]) / pitch)); k0 = int(round((0.0 - origin[2]) / pitch))
+    d_axis = edt[i0, k0] if (0 <= i0 < edt.shape[0] and 0 <= k0 < edt.shape[1]) else 0.0
+    if d_axis - wall >= 1.5:
+        hi, hk, d = i0, k0, d_axis
+    else:
+        hi, hk = np.unravel_index(int(np.argmax(edt)), edt.shape)
+        d = edt[hi, hk]
+    hole_r = min(r_want, d - wall)
+    hole = None
+    if hole_r >= 1.0:
+        hole = (origin[0] + hi * pitch, origin[2] + hk * pitch, float(hole_r))
+        if hole_r < r_want - 0.01:
+            warnings.append(f"Core: pour hole reduced to {2*hole_r:.1f} mm diameter to fit the opening.")
+    else:
+        warnings.append("Core: the opening is too narrow for a pour hole through the core, "
+                        "so none was cut. Silicone cannot be poured with this core.")
+
+    # 5. Cap centre / radius.
+    ii, kk = np.nonzero(stem2d)
+    cx = origin[0] + ii.mean() * pitch
+    cz = origin[2] + kk.mean() * pitch
+    spread = np.hypot(origin[0] + ii * pitch - cx, origin[2] + kk * pitch - cz).max()
+    cap_r = float(spread + pitch + 6.0)
+
+    # 6. Panel bore: the core dilated by one voxel (~0.35-0.5 mm) for a print fit.
+    cut = ndimage.binary_dilation(core_full, structure=ndimage.generate_binary_structure(3, 1),
+                                  iterations=1)
+
+    return {"core": core_full, "cut": cut, "pitch": pitch, "origin": origin,
+            "hole": hole, "cap": (float(cx), float(cz), cap_r), "cap_height": float(cap_height),
+            "top_y": float(top_y)}, warnings
+
+
+def build_core(fields, top_y, fill_diameter, cap_height=3.0):
+    """Create the removable core meshes in the source's own coordinates.
+
+    Returns (core_mesh, panel_cut_mesh, warnings); the meshes are None when no
+    usable core could be made.
+    """
+    info, warnings = core_voxels(fields, top_y, fill_diameter, cap_height)
+    if info is None:
+        return None, None, warnings
+    pitch, origin = info["pitch"], info["origin"]
+    core = _mask_to_mesh(info["core"], pitch, origin)
+    cut = _mask_to_mesh(info["cut"], pitch, origin)
+
+    cx, cz, cap_r = info["cap"]
+    cap = vertical_cylinder(cap_r, cap_height, sections=96)
+    cap.apply_translation([cx, top_y + cap_height / 2, cz])
+    core = boolean([core, cap], "union")
+
+    if info["hole"] is not None:
+        hx, hz, hr = info["hole"]
+        y0 = float(core.bounds[0, 1]) - 1.0
+        y1 = top_y + cap_height + 1.0
+        hole = vertical_cylinder(radius=hr, height=y1 - y0, sections=48)
+        hole.apply_translation([hx, (y0 + y1) / 2, hz])
+        core = boolean([core, hole], "difference")
+        if len(core.split(only_watertight=False)) > 1:
+            warnings.append("Core: the pour hole splits the core into separate pieces. "
+                            "Reduce the fill hole diameter.")
+    core.fix_normals()
+    return core, cut, warnings
 
 
 def transform_to_export(mesh):
@@ -380,6 +653,7 @@ class MoldGenerator:
         self.cavity_volume_mm3 = 0.0
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = 0.0
+        self.warnings: list[str] = []
 
     def load_stl(self, path):
         mesh = trimesh.load(path, force="mesh")
@@ -398,7 +672,8 @@ class MoldGenerator:
         return mesh.extents
 
     def generate(self, panels=4, top_extra=8, wall=8, base=6, clearance=3,
-                 fill_diameter=12, fill_depth=20, progress=None):
+                 fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
+                 rim_thickness=1.5, progress=None):
         if self.source is None:
             raise ValueError("Load an STL first.")
         src = self.source.copy()
@@ -418,7 +693,12 @@ class MoldGenerator:
         y_max=base_top+size[1]+max(0,float(top_extra))
         profile=radial_profile(src,size[1])
         self.profile=profile
-        cutter=offset_model(src,clearance)
+        self.warnings = []
+        if core:
+            cutter, core_fields = offset_model(src, clearance, return_fields=True)
+        else:
+            cutter = offset_model(src, clearance)
+            core_fields = None
         # The offset cutter encloses the expanded model envelope. Resin fills
         # only the gap between that envelope and the original STL, so subtract
         # the original solid volume from the offset volume.
@@ -434,11 +714,23 @@ class MoldGenerator:
             )
         cutter.apply_translation([0,base_top,0])
 
+        # Optional removable core for open cavities (cups, bowls, vases).
+        core_mesh = core_cut = None
+        if core:
+            if progress: progress("Building removable core…")
+            core_mesh, core_cut, core_warnings = build_core(
+                core_fields, top_y=float(y_max - base_top), fill_diameter=fill_diameter)
+            self.warnings.extend(core_warnings)
+            core_fields = None
+            if core_mesh is not None:
+                core_mesh.apply_translation([0, base_top, 0])
+                core_cut.apply_translation([0, base_top, 0])
+
         # Calculate the pour channel's additional volume. The channel is
         # counted only where it lies outside the expanded model envelope,
         # preventing overlap with the already-counted resin gap.
         hole_diameter = max(2.0, min(50.0, float(fill_diameter)))
-        hole_depth = max(1.0, min(float(fill_depth), y_max - y_min))
+        hole_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
         pour_channel = vertical_cylinder(
             radius=hole_diameter / 2,
             height=hole_depth,
@@ -467,12 +759,20 @@ class MoldGenerator:
         if progress: progress("Building fitted base…")
         base_blank=radial_prism(profile,base_bottom,base_top,clearance)
         parts=[]
-        # Base + locating pins.
-        pin_offset=max(0,size[0]*.22)
-        for x in (-pin_offset,pin_offset):
-            pin=vertical_cylinder(radius=1.9,height=3.2,sections=32)
-            pin.apply_translation([x,base_top+1.4,0])
-            base_blank=boolean([base_blank,pin],"union")
+        # External base rim (fused into the bottom of every wall panel).
+        rim_width=max(0.0,float(rim_width))
+        rim_on=rim_width>0.01
+        rim_height=min(max(0.5,float(rim_thickness)),max(0.5,base-1.0)) if rim_on else 0.0
+        # Base = fitted disc + a thin external rim fused around its edge at the
+        # middle of the base thickness.  The same rim is Boolean-cut out of the
+        # bottom of every wall panel as a matching groove (0.2 mm clearance).
+        rim_cut=None
+        if rim_on:
+            mid_y=base_bottom+actual_base/2
+            rim_ring=base_tab_ring(profile,mid_y,rim_height,rim_width,clearance)
+            rim_cut=base_tab_ring(profile,mid_y,rim_height,rim_width,clearance,
+                                  root=1.5,grow=0.2)
+            base_blank=boolean([base_blank,rim_ring],"union")
         base_mesh=base_blank
 
         for i in range(int(panels)):
@@ -480,6 +780,9 @@ class MoldGenerator:
             a0=i/panels*2*np.pi; a1=(i+1)/panels*2*np.pi
             blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
             panel=boolean([blank,cutter],"difference")
+            if core_cut is not None:
+                # Bore the panel so the removable core passes through it.
+                panel=boolean([panel,core_cut],"difference")
             # Flange-mounted alignment nubs below provide panel registration.
             # Contoured external clip flanges. Their full height follows the
             # smoothed outer wall profile instead of using a rectangular block.
@@ -513,6 +816,26 @@ class MoldGenerator:
                     thickness=flange_thickness,
                     tangential_offset=tangential_offset,
                 )
+
+                # Add a continuous perimeter seal to each flange mating face.
+                # Edge 1 carries the raised bead; edge 0 receives its matching
+                # slightly oversized groove, just like the base rim joint.
+                if rim_on:
+                    seal = flange_seal_ring(
+                        angle, profile, y_min, y_max, base_top,
+                        clearance=clearance, wall=wall,
+                        projection=flange_projection,
+                        tangential_face=0.0, rim_width=rim_width,
+                        rim_thickness=rim_thickness,
+                        grow=0.12 if edge == 0 else 0.0,
+                        line_y_min=flange_nub_heights[0],
+                        line_y_max=flange_nub_heights[1],
+                    )
+                    if seal is not None:
+                        if edge == 1:
+                            flange = boolean([flange, seal], "union")
+                        else:
+                            flange = boolean([flange, seal], "difference")
 
                 # At every seam, the right-hand flange (edge 1) carries
                 # outward-facing male nubs.  The next panel's left-hand
@@ -559,11 +882,16 @@ class MoldGenerator:
 
                 panel = boolean([panel, flange], "union")
 
+            if rim_cut is not None:
+                # Boolean the base rim out of the wall bottoms: a groove the
+                # base rim seats into.
+                panel=boolean([panel,rim_cut],"difference")
+
             # Cut the adjustable silicone pour channel vertically through the
             # centre of the assembled mold, matching the HTML implementation.
             # trimesh cylinders are Z-axis by default, so use the Y-axis helper.
             hole_diameter = max(2.0, min(50.0, float(fill_diameter)))
-            hole_depth = max(1.0, min(float(fill_depth), y_max - y_min))
+            hole_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
             hole = vertical_cylinder(
                 radius=hole_diameter / 2,
                 height=hole_depth + 1.0,
@@ -575,30 +903,10 @@ class MoldGenerator:
                                   (math.sin((i+.5)/panels*2*np.pi),0,
                                    math.cos((i+.5)/panels*2*np.pi))))
 
-        # Horizontal base-to-wall locating stubs and matching blind sockets.
-        for i in range(int(panels)):
-            angle=(i+.5)/panels*2*np.pi
-            inner=profile_radius(profile,angle,0)+clearance
-            nub_radius=inner-.1
-            point=np.array([math.sin(angle)*nub_radius, y_min+2.5,
-                            math.cos(angle)*nub_radius])
-            radial=np.array([math.sin(angle),0,math.cos(angle)])
-            nub=cylinder_between(1.0,2.0,point-radial,radial)
-            base_mesh=boolean([base_mesh,nub],"union")
-            socket=cylinder_between(1.25,4.4,point-radial*2.2,radial)
-            idx=i
-            parts[idx].mesh=boolean([parts[idx].mesh,socket],"difference")
+        # Horizontal base-to-wall locating stubs/sockets removed.
 
-        # Add matching blind holes to a copy of the original plug.  The
-        # holes are cut in the source's own coordinate system (its bottom
-        # face is src.bounds[0, 1]), then the complete plug is positioned
-        # against the finished base below.
+        # The plug is the untouched source model (no pin holes).
         plug=src.copy()
-        source_bottom=float(src.bounds[0,1])
-        for x in (-pin_offset,pin_offset):
-            hole=vertical_cylinder(radius=2.25,height=3.8,sections=32)
-            hole.apply_translation([x,source_bottom+1.4,0])
-            plug=boolean([plug,hole],"difference")
 
         # Align all mould parts to the build plate.
         all_meshes=[base_mesh]+[p.mesh for p in parts]
@@ -610,6 +918,8 @@ class MoldGenerator:
         self.lift_y = -lowest
         for m in all_meshes:
             m.apply_translation([0, self.lift_y, 0])
+        if core_mesh is not None:
+            core_mesh.apply_translation([0, self.lift_y, 0])
 
         # Place the duck/plug at the top of the base.  The base underside is
         # on the build-plate grid, so its top is exactly `base` millimetres
@@ -624,6 +934,9 @@ class MoldGenerator:
         self.plug = plug
         self.plug_base_clearance = float(plug.bounds[0, 1] - (base_top + self.lift_y))
         self.parts=[MoldPart("Mold_Base",base_mesh)]+parts
+        if core_mesh is not None:
+            # Core lifts straight up out of the mould when exploded.
+            self.parts.append(MoldPart("Mold_Core",core_mesh,(0.0,1.0,0.0)))
         return self.parts
 
     def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
@@ -770,13 +1083,24 @@ class MoldGenerator:
         if not tray.is_watertight:
             raise RuntimeError("The contour-following 2D mould did not produce a watertight solid.")
 
+        # Lift the complete flat mould clearly above the preview build-plate.
+        # A 0.2 mm offset was too small for the visualiser's grid/depth buffer
+        # and made the tray appear to intersect or sit below the grid.  Keep a
+        # full 1.0 mm clearance so the underside is visibly above Z=0 after
+        # the Y-up -> Z-up preview transform.  The plug receives the identical
+        # translation so it remains aligned with the mould.
+        grid_clearance = 1.0
+        actual_lift = grid_clearance - float(tray.bounds[0, 1])
+        tray.apply_translation([0.0, actual_lift, 0.0])
+        plug.apply_translation([0.0, actual_lift, 0.0])
+
         # Silicone fills the contoured well around the raised STL plug.
         well_volume = float(inner_shape.area) * wall_height
         self.cavity_volume_mm3 = max(0.0, well_volume - abs(float(src.volume)))
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = self.cavity_volume_mm3
-        self.base_top = base_top
-        self.lift_y = base_top
+        self.base_top = base_top + actual_lift
+        self.lift_y = actual_lift
         self.profile = None
         self.plug = plug
         self.parts = [MoldPart("Flat_2D_Contoured_Negative_Mold", tray)]
