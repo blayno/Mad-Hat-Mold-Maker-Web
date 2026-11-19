@@ -194,7 +194,7 @@ def base_and_source_mesh():
         abort(404)
     if len(S.generator.parts) == 1:
         return S.generator.parts[0].mesh.copy()
-    base = next((p.mesh for p in S.generator.parts if p.name == 'Mold_Base'), None)
+    base = next((p.mesh for p in S.generator.parts if p.name == 'Mould_Base'), None)
     if base is None or S.generator.plug is None:
         abort(404)
     combined = trimesh.util.concatenate([base.copy(), S.generator.plug.copy()])
@@ -206,16 +206,16 @@ def base_and_source_mesh():
 def export_part(index):
     if not S.generated or index>=len(S.generator.parts): abort(404)
     part = S.generator.parts[index]
-    mesh = base_and_source_mesh() if part.name == 'Mold_Base' else part.mesh.copy()
+    mesh = base_and_source_mesh() if part.name == 'Mould_Base' else part.mesh.copy()
     data=mesh_bytes(mesh,True)
-    filename = 'Mold_Base_and_STL.stl' if part.name == 'Mold_Base' else part.name+'.stl'
+    filename = 'Mould_Base_and_STL.stl' if part.name == 'Mould_Base' else part.name+'.stl'
     return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name=filename)
 
 @app.get('/api/export/plug')
 def export_plug():
     if not S.generated or S.generator.plug is None: abort(404)
     data=mesh_bytes(base_and_source_mesh(),True)
-    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name='Mold_Base_and_STL.stl')
+    return send_file(io.BytesIO(data),mimetype='application/sla',as_attachment=True,download_name='Mould_Base_and_STL.stl')
 
 @app.get('/api/export/zip')
 def export_zip():
@@ -225,9 +225,9 @@ def export_zip():
     buff=io.BytesIO()
     with zipfile.ZipFile(buff,'w',zipfile.ZIP_DEFLATED) as zf:
         for i,p in enumerate(S.generator.parts):
-            if p.name == 'Mold_Base':
+            if p.name == 'Mould_Base':
                 mesh = base_and_source_mesh()
-                filename = 'Mold_Base_and_STL.stl'
+                filename = 'Mould_Base_and_STL.stl'
             else:
                 mesh = p.mesh.copy()
                 filename = p.name+'.stl'
@@ -235,7 +235,7 @@ def export_zip():
                 mesh.apply_translation(np.array(p.direction)*dist)
             zf.writestr(filename,transform_to_export(mesh).export(file_type='stl'))
     buff.seek(0)
-    return send_file(buff,mimetype='application/zip',as_attachment=True,download_name='Mad_Hat_Mold_Parts.zip')
+    return send_file(buff,mimetype='application/zip',as_attachment=True,download_name='Mad_Hat_Mould_Parts.zip')
 
 @app.post('/api/project')
 def project_save():
@@ -270,6 +270,6 @@ def project_open():
     except Exception as e: return err(f'Could not open project: {e}')
 
 if __name__=='__main__':
-    print('\nMAD HAT Negative Mold Generator — Web Interface')
+    print('\nMAD HAT MOULDFORGE — Web Interface')
     print('Open http://127.0.0.1:5000 in your browser. Press Ctrl+C to stop.\n')
     app.run(host='127.0.0.1',port=5000,debug=False,threaded=True)
