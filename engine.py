@@ -542,27 +542,9 @@ def core_voxels(fields, top_y, fill_diameter, cap_height=3.0):
         warnings.append("Core: could not extend the core to the top of the mould.")
         return None, warnings
 
-    # 4. Pour hole through the core: on the axis if there is room, else at the
-    #    widest part of the stem.
-    edt = ndimage.distance_transform_edt(stem2d) * pitch
-    wall = 2.0
-    r_want = max(1.0, float(fill_diameter) / 2.0)
-    i0 = int(round((0.0 - origin[0]) / pitch)); k0 = int(round((0.0 - origin[2]) / pitch))
-    d_axis = edt[i0, k0] if (0 <= i0 < edt.shape[0] and 0 <= k0 < edt.shape[1]) else 0.0
-    if d_axis - wall >= 1.5:
-        hi, hk, d = i0, k0, d_axis
-    else:
-        hi, hk = np.unravel_index(int(np.argmax(edt)), edt.shape)
-        d = edt[hi, hk]
-    hole_r = min(r_want, d - wall)
+    # The removable core stays solid: do not bore a fill hole through its centre.
+    # The silicone pour opening is cut through the mould panels separately.
     hole = None
-    if hole_r >= 1.0:
-        hole = (origin[0] + hi * pitch, origin[2] + hk * pitch, float(hole_r))
-        if hole_r < r_want - 0.01:
-            warnings.append(f"Core: pour hole reduced to {2*hole_r:.1f} mm diameter to fit the opening.")
-    else:
-        warnings.append("Core: the opening is too narrow for a pour hole through the core, "
-                        "so none was cut. Silicone cannot be poured with this core.")
 
     # 5. Cap centre / radius.
     ii, kk = np.nonzero(stem2d)
@@ -598,16 +580,6 @@ def build_core(fields, top_y, fill_diameter, cap_height=3.0):
     cap.apply_translation([cx, top_y + cap_height / 2, cz])
     core = boolean([core, cap], "union")
 
-    if info["hole"] is not None:
-        hx, hz, hr = info["hole"]
-        y0 = float(core.bounds[0, 1]) - 1.0
-        y1 = top_y + cap_height + 1.0
-        hole = vertical_cylinder(radius=hr, height=y1 - y0, sections=48)
-        hole.apply_translation([hx, (y0 + y1) / 2, hz])
-        core = boolean([core, hole], "difference")
-        if len(core.split(only_watertight=False)) > 1:
-            warnings.append("Core: the pour hole splits the core into separate pieces. "
-                            "Reduce the fill hole diameter.")
     core.fix_normals()
     return core, cut, warnings
 
@@ -719,7 +691,7 @@ class MoldGenerator:
         if core:
             if progress: progress("Building removable core…")
             core_mesh, core_cut, core_warnings = build_core(
-                core_fields, top_y=float(y_max - base_top), fill_diameter=fill_diameter)
+                core_fields, top_y=float(size[1]), fill_diameter=fill_diameter)
             self.warnings.extend(core_warnings)
             core_fields = None
             if core_mesh is not None:
@@ -729,7 +701,9 @@ class MoldGenerator:
         # Calculate the pour channel's additional volume. The channel is
         # counted only where it lies outside the expanded model envelope,
         # preventing overlap with the already-counted resin gap.
-        hole_diameter = max(2.0, min(50.0, float(fill_diameter)))
+        hole_diameter = float(fill_diameter)
+        if not np.isfinite(hole_diameter) or hole_diameter <= 0:
+            raise ValueError("Fill hole diameter must be a positive number.")
         hole_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
         pour_channel = vertical_cylinder(
             radius=hole_diameter / 2,
@@ -890,7 +864,9 @@ class MoldGenerator:
             # Cut the adjustable silicone pour channel vertically through the
             # centre of the assembled mold, matching the HTML implementation.
             # trimesh cylinders are Z-axis by default, so use the Y-axis helper.
-            hole_diameter = max(2.0, min(50.0, float(fill_diameter)))
+            hole_diameter = float(fill_diameter)
+            if not np.isfinite(hole_diameter) or hole_diameter <= 0:
+                raise ValueError("Fill hole diameter must be a positive number.")
             hole_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
             hole = vertical_cylinder(
                 radius=hole_diameter / 2,
@@ -1111,7 +1087,7 @@ class MoldGenerator:
 
     def export_zip(self, path, exploded=0):
         max_size=max(self.source.extents)
-        dist=(exploded/100)*(8+max(12,max_size*.12))
+        dist=(exploded/100)*(8+max(30,max_size*.30))*1.25
         with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as zf:
             for i,part in enumerate(self.parts):
                 mesh=part.mesh.copy()

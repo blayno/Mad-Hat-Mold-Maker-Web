@@ -221,7 +221,7 @@ def export_plug():
 def export_zip():
     if not S.generated: abort(404)
     amount=max(0,min(100,float(request.args.get('explode',0))))
-    max_size=max(S.generator.source.extents); dist=(amount/100)*(8+max(12,max_size*.12))
+    max_size=max(S.generator.source.extents); dist=(amount/100)*(8+max(30,max_size*.30))*1.25
     buff=io.BytesIO()
     with zipfile.ZipFile(buff,'w',zipfile.ZIP_DEFLATED) as zf:
         for i,p in enumerate(S.generator.parts):
