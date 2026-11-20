@@ -1,5 +1,5 @@
 """
-MAD HAT — Negative Mould Generator (Python desktop edition)
+MAD HAT — Negative Mold Generator (Python desktop edition)
 
 Install:
     py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy shapely
@@ -647,7 +647,7 @@ class MoldGenerator:
                  fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
                  rim_thickness=1.5, progress=None):
         if self.source is None:
-            raise ValueError("Load STL first.")
+            raise ValueError("Load an STL first.")
         src = self.source.copy()
         size = src.extents
         if np.any(size <= 0):
@@ -875,7 +875,7 @@ class MoldGenerator:
             )
             hole.apply_translation([0, y_max - hole_depth / 2 + 0.5, 0])
             panel = boolean([panel, hole], "difference")
-            parts.append(MoldPart(f"Mould_Panel_{i+1:02d}",panel,
+            parts.append(MoldPart(f"Mold_Panel_{i+1:02d}",panel,
                                   (math.sin((i+.5)/panels*2*np.pi),0,
                                    math.cos((i+.5)/panels*2*np.pi))))
 
@@ -909,10 +909,10 @@ class MoldGenerator:
         # validating that the plug is above the base rather than intersecting.
         self.plug = plug
         self.plug_base_clearance = float(plug.bounds[0, 1] - (base_top + self.lift_y))
-        self.parts=[MoldPart("Mould_Base",base_mesh)]+parts
+        self.parts=[MoldPart("Mold_Base",base_mesh)]+parts
         if core_mesh is not None:
             # Core lifts straight up out of the mould when exploded.
-            self.parts.append(MoldPart("Mould_Core",core_mesh,(0.0,1.0,0.0)))
+            self.parts.append(MoldPart("Mold_Core",core_mesh,(0.0,1.0,0.0)))
         return self.parts
 
     def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
@@ -1079,7 +1079,7 @@ class MoldGenerator:
         self.lift_y = actual_lift
         self.profile = None
         self.plug = plug
-        self.parts = [MoldPart("Flat_2D_Contoured_Negative_Mould", tray)]
+        self.parts = [MoldPart("Flat_2D_Contoured_Negative_Mold", tray)]
         return self.parts
 
     def export_part(self, index, path):
