@@ -1,5 +1,5 @@
-![Screenshot](Assets/Capture.PNG)
-![Screenshot](Assets/Capture1.PNG)
+![Screenshot](Assets/Capturee.PNG)
+![Screenshot](Assets/Capturee1.PNG)
 ![Screenshot](Assets/Capture2.PNG)
 ![Screenshot](Assets/Capture3.PNG)
 
