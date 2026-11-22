@@ -21,6 +21,15 @@ S=Session()
 def err(message, code=400):
     return jsonify({'ok':False,'error':str(message)}), code
 
+
+def require_watertight(mesh, label='Mesh'):
+    if not mesh.is_watertight:
+        raise ValueError(f'{label} is not watertight (it has holes or open edges). Repair the mesh and try again.')
+    if not mesh.is_winding_consistent:
+        raise ValueError(f'{label} has inconsistent face winding. Repair the mesh and try again.')
+    if float(mesh.volume)==0.0:
+        raise ValueError(f'{label} has zero volume. Repair the mesh and try again.')
+
 def rebuild_source():
     visible=[m['mesh'].copy() for m in S.models if m['visible']]
     if visible:
@@ -65,7 +74,7 @@ def status():
 def upload():
     files=request.files.getlist('files')
     if not files: return err('Choose one or more STL files.')
-    added=[]
+    added=[]; added_models=[]
     for f in files:
         if not f.filename: continue
         suffix=Path(f.filename).suffix.lower()
@@ -75,18 +84,22 @@ def upload():
             mesh=trimesh.load(io.BytesIO(data),file_type='stl',force='mesh')
             if not isinstance(mesh,trimesh.Trimesh) or len(mesh.faces)==0:
                 raise ValueError('No triangle mesh found.')
+            # Reject non-watertight meshes immediately, before any processing.
+            require_watertight(mesh, f.filename)
             # Same source import convention as the desktop app: STL Z-up -> engine Y-up.
             mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi/2,[1,0,0]))
             mesh.remove_unreferenced_vertices(); mesh.fix_normals()
             mesh.apply_translation([-mesh.bounds.mean(axis=0)[0],-mesh.bounds[0,1],-mesh.bounds.mean(axis=0)[2]])
-            if not mesh.is_watertight:
-                raise ValueError('This source script requires a watertight STL. Repair the mesh and retry.')
-            if S.models:
-                existing_max_x=max(float(m['mesh'].bounds[1,0]) for m in S.models)
+            require_watertight(mesh, f.filename)
+            existing=S.models+added_models
+            if existing:
+                existing_max_x=max(float(m['mesh'].bounds[1,0]) for m in existing)
                 mesh.apply_translation([existing_max_x+max(5.0,float(mesh.extents[0])*.10)-float(mesh.bounds[0,0]),0,0])
-            S.models.append({'name':Path(f.filename).name,'base':mesh.copy(),'mesh':mesh.copy(),'visible':True})
+            added_models.append({'name':Path(f.filename).name,'base':mesh.copy(),'mesh':mesh.copy(),'visible':True})
             added.append(Path(f.filename).name)
         except Exception as e: return err(f'{f.filename}: {e}')
+    # All-or-nothing: only commit once every file has passed.
+    S.models.extend(added_models)
     rebuild_source()
     return jsonify({'ok':True,'added':added})
 
@@ -105,7 +118,8 @@ def transform(index):
     m.apply_translation([-m.bounds.mean(axis=0)[0],-m.bounds[0,1],-m.bounds.mean(axis=0)[2]])
     m.apply_translation([float(move[0]),float(move[2]),-float(move[1])])
     m.fix_normals()
-    if not m.is_watertight: return err('The transformed STL is no longer watertight.')
+    try: require_watertight(m, 'The transformed STL')
+    except ValueError as e: return err(e)
     S.models[index]['mesh']=m; rebuild_source()
     return jsonify({'ok':True})
 
@@ -139,6 +153,7 @@ def generate():
     d=request.get_json(force=True)
     try:
         gen=MoldGenerator(); gen.source=S.generator.source.copy()
+        require_watertight(gen.source, 'Source model')
         style=d.get('style','multi')
         want_core=bool(d.get('core',False))
         if style=='flat':
@@ -157,6 +172,8 @@ def generate():
         return jsonify({'ok':True,'parts':[p.name for p in gen.parts],'warnings':list(gen.warnings),
             'capacity':{'gap_ml':gen.cavity_volume_mm3/1000,'channel_ml':gen.pour_channel_volume_mm3/1000,
               'total_ml':gen.total_resin_volume_mm3/1000,'mix_ml':gen.total_resin_volume_mm3*1.1/1000}})
+    except ValueError as e:
+        return err(e,400)
     except Exception as e:
         traceback.print_exc(); return err(e,500)
 
@@ -265,7 +282,7 @@ def project_open():
             mesh=trimesh.load(io.BytesIO(data),file_type='stl',force='mesh')
             # Project models are stored in the engine's native Y-up coordinates.
             mesh.remove_unreferenced_vertices(); mesh.fix_normals()
-            if not mesh.is_watertight: raise ValueError(f"{item['name']} is not watertight")
+            require_watertight(mesh, item['name'])
             models.append({'name':item['name'],'base':mesh.copy(),'mesh':mesh.copy(),'visible':bool(item.get('visible',True))})
         S.models=models; rebuild_source()
         return jsonify({'ok':True})
