@@ -179,17 +179,42 @@ def build_label_tab(outer_shape, wall, base_top, text, text_height=1.0, pad=2.0)
     return meshes
 
 
+def _dense_surface_points(mesh, row_height, max_faces=600_000):
+    """Points covering the whole surface, not just the mesh vertices.
+
+    Meshes from 3MF/OBJ (and decimated STLs) often have long thin triangles, so
+    their vertices alone leave many radial bins empty.  The empty bins were then
+    filled from neighbours or a fallback radius, which produced the spiky base
+    and stepped cavity.  Subdividing the triangles first gives every bin real
+    surface samples.  The subdivided points still lie on the original surface.
+    """
+    verts = np.asarray(mesh.vertices, dtype=float)
+    try:
+        edge = min(1.5, max(0.3, float(row_height) * 0.5))
+        # Roughly 0.43 * edge^2 of area per triangle; keep the face count sane.
+        est_faces = float(mesh.area) / (0.43 * edge * edge)
+        if est_faces > max_faces:
+            edge *= math.sqrt(est_faces / max_faces)
+        dense = mesh.subdivide_to_size(max_edge=edge, max_iter=10)
+        return np.vstack([verts, np.asarray(dense.vertices, dtype=float)])
+    except Exception:
+        try:
+            n = int(min(400_000, max(50_000, float(mesh.area) / 0.09)))
+            return np.vstack([verts, np.asarray(mesh.sample(n), dtype=float)])
+        except Exception:
+            return verts
+
+
 def radial_profile(mesh, height, angle_count=144, y_count=48):
     """Conservative radial envelope of the model at sampled heights/angles."""
-    v = mesh.vertices
-    radii = np.full((y_count + 1, angle_count), np.nan)
+    v = _dense_surface_points(mesh, height / max(y_count, 1))
+    radii = np.full((y_count + 1, angle_count), -np.inf)
     yi = np.clip(np.rint(v[:, 1] / max(height, 1e-8) * y_count).astype(int), 0, y_count)
     angles = (np.arctan2(v[:, 0], v[:, 2]) + 2 * np.pi) % (2 * np.pi)
     ai = np.floor(angles / (2 * np.pi) * angle_count).astype(int) % angle_count
     rr = np.hypot(v[:, 0], v[:, 2])
-    for row, col, radius in zip(yi, ai, rr):
-        if not np.isfinite(radii[row, col]) or radius > radii[row, col]:
-            radii[row, col] = radius
+    np.maximum.at(radii, (yi, ai), rr)
+    radii[~np.isfinite(radii)] = np.nan
 
     # Fill sparse bins using a conservative neighbourhood maximum.
     for _ in range(3):

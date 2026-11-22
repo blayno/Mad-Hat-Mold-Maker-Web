@@ -17,6 +17,7 @@ class Session:
         self.settings={}
 
 S=Session()
+MESH_EXTENSIONS={'.stl','.obj','.3mf'}
 
 def err(message, code=400):
     return jsonify({'ok':False,'error':str(message)}), code
@@ -73,20 +74,23 @@ def status():
 @app.post('/api/upload')
 def upload():
     files=request.files.getlist('files')
-    if not files: return err('Choose one or more STL files.')
+    if not files: return err('Choose one or more STL, OBJ or 3MF files.')
     added=[]; added_models=[]
     for f in files:
         if not f.filename: continue
         suffix=Path(f.filename).suffix.lower()
-        if suffix != '.stl': return err(f'{f.filename}: only STL files are supported.')
+        if suffix not in MESH_EXTENSIONS: return err(f'{f.filename}: only STL, OBJ and 3MF files are supported.')
         data=f.read()
         try:
-            mesh=trimesh.load(io.BytesIO(data),file_type='stl',force='mesh')
+            mesh=trimesh.load(io.BytesIO(data),file_type=suffix.lstrip('.'),force='mesh')
             if not isinstance(mesh,trimesh.Trimesh) or len(mesh.faces)==0:
                 raise ValueError('No triangle mesh found.')
+            # Rebuild as a plain geometry-only mesh: drops UVs/colours/normals (OBJ, 3MF) and
+            # merges vertices by position so seams don't make the mesh look non-watertight.
+            mesh=trimesh.Trimesh(vertices=mesh.vertices.copy(),faces=mesh.faces.copy(),process=True)
             # Reject non-watertight meshes immediately, before any processing.
             require_watertight(mesh, f.filename)
-            # Same source import convention as the desktop app: STL Z-up -> engine Y-up.
+            # Same source import convention as the desktop app: Z-up (STL/OBJ/3MF) -> engine Y-up.
             mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi/2,[1,0,0]))
             mesh.remove_unreferenced_vertices(); mesh.fix_normals()
             mesh.apply_translation([-mesh.bounds.mean(axis=0)[0],-mesh.bounds[0,1],-mesh.bounds.mean(axis=0)[2]])
