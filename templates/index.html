@@ -1,19 +1,201 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MAD HAT — Negative Mold Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script></head>
-<body><div class="app">
-<aside class="sidebar"><header style="display:flex;align-items:center;gap:12px"><img src="/static/mad_hat_logo_sidebar.png" alt="Mad Hat Mouldforge logo" style="height:64px;width:auto;flex:none"><div><div class="brand">MAD HAT</div><div class="subtitle">MOULDFORGE · WEB + PYTHON ENGINE</div></div></header>
-<nav class="tabs"><button class="tab active" data-tab="build">BUILD</button><button class="tab" data-tab="preview">PREVIEW / EXPORT</button><button class="tab" data-tab="transform">SCALE / TRANSFORM</button></nav>
-<section class="tabpage active" id="tab-build">
-<div class="group"><h3>01 · SOURCE MODEL</h3><div id="modelInfo" class="muted">No model loaded. Upload an STL, OBJ or 3MF to get started.</div><label class="button primary">UPLOAD STL / OBJ / 3MF<input id="stlFiles" type="file" accept=".stl,.obj,.3mf" multiple hidden></label><div class="row"><button id="deleteAll" class="danger" disabled>DELETE ALL</button><button id="saveProject" disabled>SAVE PROJECT</button><label class="button">OPEN PROJECT<input id="openProject" type="file" accept=".zip" hidden></label></div></div>
-<div class="group"><h3>02 · MOULD CONFIGURATION</h3><label>Mould type<select id="style"><option value="multi">Multi-piece 3D mold</option><option value="flat">2D flat pour mold</option></select></label><label>Removable panels<select id="panels"><option>2</option><option selected>4</option><option>5</option><option>6</option><option>8</option></select></label><label>2D mould margin (mm)<input id="margin" type="number" value="10" min="2" max="100" step="1"></label><label>Top height extra 2D/3D(mm)<input id="top_extra" type="number" value="8" min="0" max="100" step="1"></label><label>Wall thickness 2D/3D (mm)<input id="wall" type="number" value="8" min="3" max="100" step="1"></label><label>Base thickness 2D/3D(mm)<input id="base" type="number" value="6" min="3" max="100" step="1"></label><label>Cavity clearance (mm)<input id="clearance" type="number" value="3" min="0" max="20" step="0.1"></label><label>Fill hole diameter (mm)<input id="fill_diameter" type="number" value="12" min="0.1" step="0.5"></label><label>Fill hole depth (%)<input id="fill_depth_percent" type="number" value="50" min="1" max="100" step="1"></label><label>Base rim width (mm, 0 = none)<input id="rim_width" type="number" value="2.5" min="0" max="6" step="0.5"></label>
-<label>Base rim thickness (mm)<input id="rim_thickness" type="number" value="1.5" min="0.5" max="5" step="0.25"></label><label class="check"><input type="checkbox" id="core_enabled"> Add removable core (cups, bowls, vases)</label><p class="muted small">For models open at the top. Prints as a separate core part that fills the cavity, leaving the silicone gap.</p><label class="check"><input type="checkbox" id="label_tab" checked> Add silicone amount tab (2D mould)</label><button id="generate" class="primary wide" disabled>GENERATE MOLD</button><div id="status" class="status" style="white-space:pre-line">Upload an STL, OBJ or 3MF to begin.</div></div>
-<div class="group"><h3>03 · RESIN REQUIRED — STL ONLY</h3><div id="stlVolume">Original STL volume: —</div><div id="stlFill" class="total">Resin to fill STL: —</div><div id="stlMix" class="mix">Mixing amount (+10%): —</div><p class="muted small">Based on the source mesh volume. The source script requires a watertight STL.</p></div>
-<div class="group"><h3>04 · SILICONE REQUIRED</h3><div id="flatDims" class="muted small" hidden></div><div id="gap">Silicone gap required: —</div><div id="channel">Pour channel volume: —</div><div id="capacity" class="total">Total silicone required: —</div><div id="mix" class="mix">Mixing amount (+10%): —</div><p id="siliconeNote" class="muted small">Includes the silicone gap and pour channel without double-counting their overlap.</p></div>
-</section>
-<section class="tabpage" id="tab-preview"><div class="group"><h3>PREVIEW CONTROLS</h3><label class="check"><input type="checkbox" id="showSource" checked> Show original STL / plug</label><label>Explode amount <output id="explodeLabel">0%</output><input id="explode" type="range" min="0" max="100" value="0"></label><button id="explodeBtn">EXPLODE MOLD</button></div><div class="group"><h3>PART VISIBILITY</h3><div id="partsList" class="list muted">Generate a mould to see parts.</div></div><div class="group"><h3>EXPORT</h3><label>Selected part<select id="selectedPart"><option value="0">—</option></select></label><button id="exportSelected">EXPORT SELECTED PART · STL</button><button id="exportAll">EXPORT ALL PARTS · ZIP</button><button id="exportExploded">EXPORT EXPLODED MOULD · ZIP</button><button id="exportPlug">EXPORT LOCATED ORIGINAL PLUG · STL</button></div></section>
-<section class="tabpage" id="tab-transform"><div class="group"><h3>STL SELECTION</h3><div id="modelsList" class="list muted">No STL models loaded.</div><div class="row"><button id="showAll" disabled>SHOW ALL</button><button id="deleteSelected" class="danger" disabled>DELETE</button></div><p class="muted small">Tick an STL to show or hide it. Select its name to make it active for transforms.</p></div><div class="group"><h3>01 · SCALE MODEL</h3><label class="check"><input id="uniform" type="checkbox" checked> Lock X / Y / Z scale together</label><label>Width scale (X)<input id="sx" type="number" value="1" min="0.01" max="100" step="0.05"></label><label>Length scale (Y)<input id="sy" type="number" value="1" min="0.01" max="100" step="0.05"></label><label>Height scale (Z)<input id="sz" type="number" value="1" min="0.01" max="100" step="0.05"></label></div><div class="group"><h3>02 · ROTATE MODEL</h3><label>Rotate X (°)<input id="rx" type="number" value="0" min="-360" max="360" step="5"></label><label>Rotate Y (°)<input id="ry" type="number" value="0" min="-360" max="360" step="5"></label><label>Rotate Z (°)<input id="rz" type="number" value="0" min="-360" max="360" step="5"></label></div><div class="group"><h3>03 · MOVE MODEL</h3><label>Move X (mm)<input id="mx" type="number" value="0" min="-1000" max="1000" step="1"></label><label>Move Y (mm)<input id="my" type="number" value="0" min="-1000" max="1000" step="1"></label><label>Move Z (mm)<input id="mz" type="number" value="0" min="-1000" max="1000" step="1"></label></div><div class="group"><h3>04 · DUPLICATE MODEL</h3><button id="duplicate" disabled>DUPLICATE STL</button><p class="muted small">Adds a copy beside the selected STL. Visible models are combined when generating.</p><button id="resetTransform">RESET TRANSFORM</button><div id="transformStatus" class="status">Live transform enabled.</div></div></section>
-<div class="footer">Python geometry engine · Local browser interface</div></aside>
-<main class="viewport"><div class="viewbar"><span>VIEW</span><button data-view="top">TOP</button><button data-view="front">FRONT</button><button data-view="back">BACK</button><button data-view="left">LEFT</button><button data-view="right">RIGHT</button><button data-view="iso" class="selected">ISO</button><span id="sceneInfo"></span></div><div id="canvas"></div><div class="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</div></main></div>
+<body data-style="multi"><div class="app">
+
+<aside class="sidebar">
+  <header class="brandbar">
+    <img src="/static/mad_hat_logo_sidebar.png" alt="Mad Hat Mouldforge logo">
+    <div><div class="brand">MAD HAT</div><div class="subtitle">Mouldforge</div></div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="build" role="tab">Build</button>
+    <button class="tab" data-tab="preview" role="tab">Preview &amp; export</button>
+    <button class="tab" data-tab="transform" role="tab">Transform</button>
+  </nav>
+
+  <!-- BUILD -->
+  <section class="tabpage active" id="tab-build">
+    <div class="group">
+      <h3>Source models</h3>
+      <div id="modelInfo" class="muted">No model loaded yet.</div>
+      <label class="button primary wide">Upload STL / OBJ / 3MF<input id="stlFiles" type="file" accept=".stl,.obj,.3mf" multiple hidden></label>
+      <div class="row3">
+        <button id="saveProject" disabled>Save project</button>
+        <label class="button">Open project<input id="openProject" type="file" accept=".zip" hidden></label>
+        <button id="deleteAll" class="danger" disabled>Delete all</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Mould settings</h3>
+      <label class="field"><span class="lbl">Mould type</span>
+        <select id="style"><option value="multi">Multi-piece 3D mould</option><option value="flat">2D flat pour mould</option></select></label>
+
+      <div class="grid2">
+        <label class="field" data-only="multi"><span class="lbl">Removable panels</span>
+          <select id="panels"><option>2</option><option selected>4</option><option>5</option><option>6</option><option>8</option></select></label>
+        <label class="field" data-only="flat"><span class="lbl">Margin around model</span>
+          <span class="inp"><input id="margin" type="number" value="10" min="2" max="100" step="1"><em>mm</em></span></label>
+      </div>
+
+      <details class="fold" open>
+        <summary>Size and thickness</summary>
+        <div class="grid2">
+          <label class="field"><span class="lbl">Extra height above model</span>
+            <span class="inp"><input id="top_extra" type="number" value="8" min="0" max="100" step="1"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Wall thickness</span>
+            <span class="inp"><input id="wall" type="number" value="8" min="3" max="100" step="1"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Base thickness</span>
+            <span class="inp"><input id="base" type="number" value="6" min="3" max="100" step="1"><em>mm</em></span></label>
+          <label class="field" data-only="multi"><span class="lbl">Cavity clearance</span>
+            <span class="inp"><input id="clearance" type="number" value="3" min="0" max="20" step="0.1"><em>mm</em></span></label>
+        </div>
+      </details>
+
+      <details class="fold" data-only="multi">
+        <summary>Fill hole and base rim</summary>
+        <div class="grid2">
+          <label class="field"><span class="lbl">Fill hole diameter</span>
+            <span class="inp"><input id="fill_diameter" type="number" value="12" min="0.1" step="0.5"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Fill hole depth</span>
+            <span class="inp"><input id="fill_depth_percent" type="number" value="50" min="1" max="100" step="1"><em>%</em></span></label>
+          <label class="field"><span class="lbl">Rim width (0 = none)</span>
+            <span class="inp"><input id="rim_width" type="number" value="2.5" min="0" max="6" step="0.5"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Rim thickness</span>
+            <span class="inp"><input id="rim_thickness" type="number" value="1.5" min="0.5" max="5" step="0.25"><em>mm</em></span></label>
+        </div>
+      </details>
+
+      <div class="options">
+        <label class="check" data-only="multi"><input type="checkbox" id="core_enabled"><span>Add a removable core
+          <small>For models open at the top, like cups, bowls and vases. Prints as a separate part that fills the cavity and leaves the silicone gap.</small></span></label>
+        <label class="check" data-only="flat"><input type="checkbox" id="label_tab" checked><span>Add a silicone amount tab
+          <small>Embosses the silicone volume on the side of the mould.</small></span></label>
+      </div>
+    </div>
+
+    <div class="actionbar">
+      <button id="generate" class="primary wide" disabled>Generate mould</button>
+      <div id="status" class="status">Upload an STL, OBJ or 3MF to begin.</div>
+    </div>
+
+    <div class="group">
+      <h3>Resin for the model</h3>
+      <dl class="stats">
+        <div class="stat key"><dt>Fills the model</dt><dd id="stlFill">—</dd></div>
+        <div class="stat"><dt>Mix with 10% extra</dt><dd id="stlMix">—</dd></div>
+      </dl>
+      <p class="muted small">Based on the volume of the source mesh, which must be watertight.</p>
+    </div>
+
+    <div class="group">
+      <h3>Silicone for the mould</h3>
+      <div id="flatDims" class="muted small" hidden></div>
+      <dl class="stats">
+        <div class="stat"><dt id="gapL">Gap around the model</dt><dd id="gap">—</dd></div>
+        <div class="stat"><dt id="channelL">Pour channel</dt><dd id="channel">—</dd></div>
+        <div class="stat key"><dt>Total silicone</dt><dd id="capacity">—</dd></div>
+        <div class="stat"><dt>Mix with 10% extra</dt><dd id="mix">—</dd></div>
+      </dl>
+      <p id="siliconeNote" class="muted small">Includes the silicone gap and pour channel without double-counting their overlap.</p>
+    </div>
+  </section>
+
+  <!-- PREVIEW / EXPORT -->
+  <section class="tabpage" id="tab-preview">
+    <div class="group">
+      <h3>View</h3>
+      <label class="check"><input type="checkbox" id="showSource" checked><span>Show original model / plug</span></label>
+      <label class="field"><span class="lbl split">Explode <output id="explodeLabel">0%</output></span>
+        <input id="explode" type="range" min="0" max="100" value="0"></label>
+      <button id="explodeBtn">Explode mould</button>
+    </div>
+    <div class="group">
+      <h3>Parts</h3>
+      <div id="partsList" class="list muted">Generate a mould to see its parts.</div>
+    </div>
+    <div class="group">
+      <h3>Export</h3>
+      <div class="selrow">
+        <label class="field"><span class="lbl">Selected part</span>
+          <select id="selectedPart"><option value="0">—</option></select></label>
+        <button id="exportSelected">Export STL</button>
+      </div>
+      <button id="exportAll" class="primary wide">Export all parts (ZIP)</button>
+      <button id="exportExploded" class="wide">Export exploded mould (ZIP)</button>
+      <button id="exportPlug" class="wide">Export located original plug (STL)</button>
+    </div>
+  </section>
+
+  <!-- TRANSFORM -->
+  <section class="tabpage" id="tab-transform">
+    <div class="group">
+      <h3>Models</h3>
+      <div id="modelsList" class="list muted">No models loaded.</div>
+      <div class="row">
+        <button id="showAll" disabled>Show all</button>
+        <button id="duplicate" disabled>Duplicate</button>
+        <button id="deleteSelected" class="danger" disabled>Delete</button>
+      </div>
+      <p class="muted small">Tick a model to show or hide it. Select its name to transform it. Visible models are combined when you generate.</p>
+    </div>
+
+    <div class="group">
+      <h3>Scale</h3>
+      <label class="check"><input id="uniform" type="checkbox" checked><span>Lock X, Y and Z together</span></label>
+      <div class="xyz">
+        <label class="field axis-x" title="Width"><span class="lbl">X width</span><span class="inp"><input id="sx" type="number" value="1" min="0.01" max="100" step="0.05"><em>×</em></span></label>
+        <label class="field axis-y" title="Length"><span class="lbl">Y length</span><span class="inp"><input id="sy" type="number" value="1" min="0.01" max="100" step="0.05"><em>×</em></span></label>
+        <label class="field axis-z" title="Height"><span class="lbl">Z height</span><span class="inp"><input id="sz" type="number" value="1" min="0.01" max="100" step="0.05"><em>×</em></span></label>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Rotate</h3>
+      <div class="xyz">
+        <label class="field axis-x"><span class="lbl">X</span><span class="inp"><input id="rx" type="number" value="0" min="-360" max="360" step="5"><em>°</em></span></label>
+        <label class="field axis-y"><span class="lbl">Y</span><span class="inp"><input id="ry" type="number" value="0" min="-360" max="360" step="5"><em>°</em></span></label>
+        <label class="field axis-z"><span class="lbl">Z</span><span class="inp"><input id="rz" type="number" value="0" min="-360" max="360" step="5"><em>°</em></span></label>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Move</h3>
+      <div class="xyz">
+        <label class="field axis-x"><span class="lbl">X</span><span class="inp"><input id="mx" type="number" value="0" min="-1000" max="1000" step="1"><em>mm</em></span></label>
+        <label class="field axis-y"><span class="lbl">Y</span><span class="inp"><input id="my" type="number" value="0" min="-1000" max="1000" step="1"><em>mm</em></span></label>
+        <label class="field axis-z"><span class="lbl">Z</span><span class="inp"><input id="mz" type="number" value="0" min="-1000" max="1000" step="1"><em>mm</em></span></label>
+      </div>
+      <button id="resetTransform" class="wide">Reset transform</button>
+      <div id="transformStatus" class="status">Changes apply live. Regenerate the mould to rebuild from the new geometry.</div>
+    </div>
+  </section>
+
+  <div class="footer">Runs locally on this computer</div>
+</aside>
+
+<main class="viewport">
+  <div class="viewbar">
+    <div class="seg" role="group" aria-label="Camera view">
+      <button data-view="top">Top</button><button data-view="front">Front</button><button data-view="back">Back</button><button data-view="left">Left</button><button data-view="right">Right</button><button data-view="iso" class="selected">Iso</button>
+    </div>
+    <span id="sceneInfo"></span>
+  </div>
+  <div id="canvas"></div>
+  <div id="empty" class="empty">
+    <div>
+      <h2>Add a model to start</h2>
+      <p>Drop an STL, OBJ or 3MF anywhere in this view, or choose a file.</p>
+      <button id="emptyUpload" class="primary">Choose file</button>
+    </div>
+  </div>
+  <div class="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
+</main>
+</div>
+<div id="toasts" role="status" aria-live="polite"></div>
 <script type="module" src="/static/app.js"></script></body></html>
