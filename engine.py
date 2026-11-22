@@ -1,24 +1,19 @@
 """
-MAD HAT — Negative Mold Generator (Python desktop edition)
+MAD HAT — Negative Mold Generator (geometry engine)
 
 Install:
-    py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy shapely
+    pip install flask trimesh manifold3d numpy scipy shapely scikit-image
 
-Run:
-    py MadHat_Negative_Mold_Generator.py
-
-STL input is expected to be Z-up. Generated STL exports are Z-up.
+The engine works Y-up internally. Imported meshes are Z-up and are rotated on
+import (see app.py); generated STL exports are Z-up again.
 Boolean operations use the Manifold3D engine via trimesh.
+
+progress(message, fraction=None) callbacks are optional. A callback may raise
+to abort generation (app.py uses this for Cancel).
 """
 from __future__ import annotations
 
 import math
-import os
-import sys
-import zipfile
-import json
-import io
-import traceback
 from dataclasses import dataclass
 
 import numpy as np
@@ -282,14 +277,21 @@ def profile_radius(profile, angle, y, outer=False):
 
 
 def offset_model(mesh, clearance, return_fields=False):
-    """Build a robust outward offset using a filled voxel distance field.
+    """Build a robust outward offset from a filled voxel distance field.
 
-    Vertex-normal offsets can fold over on dense, highly curved meshes.  A
-    volumetric dilation avoids those self-intersections and gives the Boolean
-    engine a single, watertight cutter.  The voxel pitch is capped at 0.5 mm
-    for useful detail without creating an excessive memory footprint.
+    Vertex-normal offsets can fold over on dense, highly curved meshes, so the
+    source is voxelised, filled, and a Euclidean distance transform gives the
+    distance from every voxel to the solid.  The cutter surface is extracted
+    with marching cubes on that *distance field* at the clearance level, which
+    places vertices with sub-voxel accuracy.  (Marching cubes on a binary mask
+    would put every vertex on a voxel face and leave visible stair-stepping.)
+
+    The voxel pitch is capped at 0.5 mm for useful detail without creating an
+    excessive memory footprint; very large models get a coarser pitch, which
+    is reported in fields["pitch"].
     """
     from scipy import ndimage
+    from skimage import measure
 
     distance = max(0.0, float(clearance)) + 0.15
     if not np.isfinite(distance):
@@ -299,8 +301,6 @@ def offset_model(mesh, clearance, return_fields=False):
     if np.any(~np.isfinite(extents)) or np.any(extents <= 0):
         raise ValueError("Cannot offset a mesh with invalid dimensions.")
 
-    # Keep the grid fine enough to represent the clearance, while limiting
-    # the total number of voxels for larger source models.
     pitch = min(0.5, max(0.35, distance / 6.0))
     estimated_voxels = float(np.prod(np.ceil(extents / pitch + 4)))
     if estimated_voxels > 14_000_000:
@@ -313,25 +313,29 @@ def offset_model(mesh, clearance, return_fields=False):
         if occupied.size == 0 or not occupied.any():
             raise ValueError("Voxelisation produced an empty model.")
 
-        # Add enough empty space around the source for the complete offset.
+        # Empty space around the source for the complete offset.
         pad = int(math.ceil(distance / pitch)) + 3
         padded = np.pad(occupied, pad, mode="constant", constant_values=False)
 
-        # Distance from every empty voxel centre to the filled source volume.
-        # Include half a voxel diagonal to compensate for centre sampling and
-        # produce a conservative outward clearance.
-        outside_distance = ndimage.distance_transform_edt(~padded, sampling=pitch)
-        offset_volume = padded | (outside_distance <= distance + pitch * 0.5)
+        # Signed distance to the filled volume, measured from the voxel
+        # surface (half a voxel from the occupied voxel centres): positive
+        # outside, negative inside.
+        outside = ndimage.distance_transform_edt(~padded, sampling=pitch)
+        inside = ndimage.distance_transform_edt(padded, sampling=pitch)
+        sdf = np.where(padded, -(inside - 0.5 * pitch), outside - 0.5 * pitch)
+        sdf = sdf.astype(np.float32)
+        # Very light smoothing removes the residual EDT ripple. At sigma 0.5
+        # voxels the surface moves by far less than the clearance.
+        sdf = ndimage.gaussian_filter(sdf, sigma=0.5)
 
-        out = trimesh.voxel.ops.matrix_to_marching_cubes(
-            offset_volume, pitch=pitch
-        )
-        # matrix_to_marching_cubes returns coordinates relative to the padded
-        # array. Restore the source voxel grid's world-space origin.
+        offset_volume = sdf <= distance          # source + clearance (binary)
+
         grid_origin = np.asarray(surface.transform[:3, 3], dtype=float)
-        out.apply_translation(grid_origin - pad * pitch)
+        origin = grid_origin - pad * pitch       # world position of voxel [0,0,0]
+        verts, faces, _normals, _values = measure.marching_cubes(
+            sdf, level=float(distance), spacing=(pitch, pitch, pitch))
+        out = trimesh.Trimesh(vertices=verts + origin, faces=faces, process=True)
         out.remove_unreferenced_vertices()
-        out.process(validate=True)
         out.fix_normals()
 
         if (not out.is_watertight or not out.is_winding_consistent or
@@ -341,10 +345,10 @@ def offset_model(mesh, clearance, return_fields=False):
             )
         if return_fields:
             fields = {
-                "padded": padded,                      # filled source voxels
-                "offset_volume": offset_volume,        # source + clearance
+                "padded": padded,                  # filled source voxels
+                "offset_volume": offset_volume,    # source + clearance
                 "pitch": float(pitch),
-                "origin": grid_origin - pad * pitch,   # world pos of voxel [0,0,0]
+                "origin": origin,
             }
             return out, fields
         return out
@@ -354,47 +358,77 @@ def offset_model(mesh, clearance, return_fields=False):
         ) from exc
 
 
-def annular_panel(profile, a0, a1, y_min, y_max, wall, clearance, base_top):
-    na, ny = 192, 128
-    verts = []
-    faces = []
-    grid = (na + 1) * (ny + 1)
+def profile_radius_grid(profile, angle, y, outer=False):
+    """Vectorised profile_radius: `angle` and `y` are broadcast against each other."""
+    rows = profile["outer"] if outer else profile["inner"]
+    n, ny = profile["angles"], profile["rows"]
+    angle = np.asarray(angle, dtype=float)
+    y = np.asarray(y, dtype=float)
+    af = ((angle % (2 * np.pi)) / (2 * np.pi)) * n
+    a_floor = np.floor(af)
+    at = af - a_floor
+    a0 = a_floor.astype(int) % n
+    a1 = (a0 + 1) % n
+    yf = np.clip(y / max(profile["height"], 1e-8) * ny, 0, ny)
+    y_floor = np.floor(yf)
+    yt = yf - y_floor
+    y0 = y_floor.astype(int)
+    y1 = np.minimum(ny, y0 + 1)
+    r0 = rows[y0, a0] * (1 - at) + rows[y0, a1] * at
+    r1 = rows[y1, a0] * (1 - at) + rows[y1, a1] * at
+    return r0 * (1 - yt) + r1 * yt
+
+
+def annular_panel_arrays(profile, a0, a1, y_min, y_max, wall, clearance, base_top,
+                         na=192, ny=128):
+    """Vertices/faces of one annular wall panel blank (vectorised)."""
     reserve = max(5.0, wall * .55)
-    for layer in range(2):
-        for j in range(ny + 1):
-            y = y_min + (y_max-y_min) * j/ny
-            for i in range(na + 1):
-                a = a0 + (a1-a0) * i/na
-                source_y = y - base_top
-                if y <= base_top + 1e-6:
-                    ri = profile_radius(profile, a, 0) + clearance
-                else:
-                    ri = .25
-                ro = profile_radius(profile, a, source_y, True) + clearance + wall + reserve
-                r = ri if layer == 0 else ro
-                verts.append([math.sin(a)*max(.2, r), y, math.cos(a)*max(.2, r)])
+    ang = a0 + (a1 - a0) * np.arange(na + 1) / na            # (na+1,)
+    ys = y_min + (y_max - y_min) * np.arange(ny + 1) / ny    # (ny+1,)
+    A, Y = np.meshgrid(ang, ys)                              # (ny+1, na+1)
+    source_y = Y - base_top
+    base_r = profile_radius_grid(profile, A, np.zeros_like(A)) + clearance
+    ri = np.where(Y <= base_top + 1e-6, base_r, .25)
+    ro = profile_radius_grid(profile, A, source_y, True) + clearance + wall + reserve
+    verts = []
+    for r in (ri, ro):
+        rr = np.maximum(.2, r)
+        verts.append(np.stack([np.sin(A) * rr, Y, np.cos(A) * rr], axis=-1).reshape(-1, 3))
+    verts = np.vstack(verts)
+
+    grid = (na + 1) * (ny + 1)
+    faces = []
+
+    def quad(a, b, c, d):
+        faces.append(np.stack([a, b, d], axis=-1))
+        faces.append(np.stack([b, c, d], axis=-1))
+
+    jj, ii = np.meshgrid(np.arange(ny), np.arange(na), indexing="ij")
+    jj, ii = jj.ravel(), ii.ravel()
 
     def idx(layer, i, j):
-        return layer*grid + j*(na+1)+i
-
-    def quad(a,b,c,d):
-        faces.extend([[a,b,d],[b,c,d]])
+        return layer * grid + j * (na + 1) + i
 
     for layer in range(2):
-        for j in range(ny):
-            for i in range(na):
-                a,b,c,d = idx(layer,i,j),idx(layer,i+1,j),idx(layer,i+1,j+1),idx(layer,i,j+1)
-                if layer == 0:
-                    quad(a,d,c,b)
-                else:
-                    quad(a,b,c,d)
-    for j in range(ny):
-        quad(idx(0,0,j),idx(1,0,j),idx(1,0,j+1),idx(0,0,j+1))
-        quad(idx(0,na,j),idx(0,na,j+1),idx(1,na,j+1),idx(1,na,j))
-    for i in range(na):
-        quad(idx(0,i,0),idx(1,i,0),idx(1,i+1,0),idx(0,i+1,0))
-        quad(idx(0,i,ny),idx(1,i,ny),idx(1,i+1,ny),idx(0,i+1,ny))
-    result = trimesh.Trimesh(vertices=np.asarray(verts), faces=np.asarray(faces), process=True)
+        a, b = idx(layer, ii, jj), idx(layer, ii + 1, jj)
+        c, d = idx(layer, ii + 1, jj + 1), idx(layer, ii, jj + 1)
+        if layer == 0:
+            quad(a, d, c, b)
+        else:
+            quad(a, b, c, d)
+    j = np.arange(ny)
+    quad(idx(0, 0, j), idx(1, 0, j), idx(1, 0, j + 1), idx(0, 0, j + 1))
+    quad(idx(0, na, j), idx(0, na, j + 1), idx(1, na, j + 1), idx(1, na, j))
+    i = np.arange(na)
+    quad(idx(0, i, 0), idx(1, i, 0), idx(1, i + 1, 0), idx(0, i + 1, 0))
+    quad(idx(0, i, ny), idx(1, i, ny), idx(1, i + 1, ny), idx(0, i + 1, ny))
+    return verts, np.vstack(faces)
+
+
+def annular_panel(profile, a0, a1, y_min, y_max, wall, clearance, base_top):
+    verts, faces = annular_panel_arrays(profile, a0, a1, y_min, y_max, wall,
+                                        clearance, base_top)
+    result = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
     result.fix_normals()
     return result
 
@@ -723,6 +757,24 @@ def transform_to_export(mesh):
     return out
 
 
+def transform_set_to_export(meshes):
+    """Y-up to Z-up for several meshes at once, keeping their relative positions.
+
+    transform_to_export() drops every mesh onto Z=0 individually, which is right
+    for printing a part but undoes an exploded layout.  Here the whole set shares
+    one offset so the lowest point of the set sits at Z=0.
+    """
+    outs = []
+    for mesh in meshes:
+        out = mesh.copy()
+        out.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2, [1,0,0]))
+        outs.append(out)
+    low = min(float(o.bounds[0, 2]) for o in outs)
+    for o in outs:
+        o.apply_translation([0, 0, -low])
+    return outs
+
+
 def transform_to_preview(mesh):
     """Rotate a preview copy to Z-up while preserving its world position.
 
@@ -735,6 +787,52 @@ def transform_to_preview(mesh):
         trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])
     )
     return out
+
+
+def mesh_footprint(mesh):
+    """Union of every triangle projected onto the horizontal X/Z plane (shapely)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    tri = np.asarray(mesh.vertices, dtype=float)[np.asarray(mesh.faces)][:, :, [0, 2]]
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    area2 = np.abs((b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0]))
+    tri = tri[area2 > 2e-7]
+    if len(tri) == 0:
+        raise ValueError("Could not extract a usable 2D outline from this STL.")
+    try:
+        import shapely
+        polys = shapely.polygons(tri)           # shapely >= 2: vectorised
+        footprint = shapely.union_all(polys)
+    except (ImportError, AttributeError):
+        footprint = unary_union([Polygon(t) for t in tri])
+    return footprint.buffer(0)
+
+
+def join_islands(shape, margin):
+    """Connect separate polygons with bridges so one tray can hold them all.
+
+    Repeatedly links the nearest remaining island to the growing cluster with a
+    strip `2 * margin` wide. Returns (single_polygon, number_of_bridges).
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points, unary_union
+
+    geoms = list(shape.geoms) if shape.geom_type == "MultiPolygon" else [shape]
+    if len(geoms) <= 1:
+        return shape, 0
+    cluster = geoms.pop(0)
+    bridges = 0
+    while geoms:
+        k = min(range(len(geoms)), key=lambda i: cluster.distance(geoms[i]))
+        g = geoms.pop(k)
+        p, q = nearest_points(cluster, g)
+        strip = LineString([(p.x, p.y), (q.x, q.y)]).buffer(max(1.0, margin))
+        cluster = unary_union([cluster, g, strip]).buffer(0)
+        bridges += 1
+    if cluster.geom_type == "MultiPolygon":
+        cluster = max(cluster.geoms, key=lambda g: g.area)
+    return cluster, bridges
 
 
 @dataclass
@@ -759,31 +857,21 @@ class MoldGenerator:
         self.flat_stats = None  # filled by generate_flat_2d()
         self.warnings: list[str] = []
 
-    def load_stl(self, path):
-        mesh = trimesh.load(path, force="mesh")
-        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
-            raise ValueError("The selected STL does not contain a triangle mesh.")
-        # STL is Z-up; rotate into the generator's Y-up coordinates.
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi/2, [1,0,0]))
-        mesh.remove_unreferenced_vertices()
-        mesh.fix_normals()
-        mesh.apply_translation([-mesh.bounds.mean(axis=0)[0], -mesh.bounds[0,1],
-                                -mesh.bounds.mean(axis=0)[2]])
-        if not mesh.is_watertight:
-            raise ValueError("The uploaded STL is not watertight. Repair it in a mesh tool and retry.")
-        self.source = mesh
-        self.parts.clear()
-        return mesh.extents
-
     def generate(self, panels=4, top_extra=8, wall=8, base=6, clearance=3,
                  fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
                  rim_thickness=1.5, progress=None):
         if self.source is None:
             raise ValueError("Load an STL first.")
         src = self.source.copy()
+        # The wall envelope, pour hole and panels are all built around the
+        # vertical axis through the origin, so centre the (possibly multi-model)
+        # source on its bounding box and sit it on Y=0.
+        bb = src.bounds
+        src.apply_translation([-(bb[0,0]+bb[1,0])/2.0, -bb[0,1], -(bb[0,2]+bb[1,2])/2.0])
         size = src.extents
         if np.any(size <= 0):
             raise ValueError("The STL has invalid or zero dimensions.")
+        if progress: progress("Analysing the model…", 0.02)
         wall=max(3,float(wall)); base=max(3,float(base))
         # Keep the base underside at the local build-plate reference and make
         # its actual thickness exactly equal to the user's base setting.
@@ -798,10 +886,13 @@ class MoldGenerator:
         profile=radial_profile(src,size[1])
         self.profile=profile
         self.warnings = []
-        if core:
-            cutter, core_fields = offset_model(src, clearance, return_fields=True)
-        else:
-            cutter = offset_model(src, clearance)
+        if progress: progress("Building the cavity offset (the slow step on big models)…", 0.06)
+        cutter, core_fields = offset_model(src, clearance, return_fields=True)
+        if core_fields["pitch"] > 0.6:
+            self.warnings.append(
+                f"Large model: the cavity was built at {core_fields['pitch']:.2f} mm resolution, "
+                "so fine surface detail in the silicone gap will be softened.")
+        if not core:
             core_fields = None
         # The offset cutter encloses the expanded model envelope. Resin fills
         # only the gap between that envelope and the original STL, so subtract
@@ -821,7 +912,7 @@ class MoldGenerator:
         # Optional removable core for open cavities (cups, bowls, vases).
         core_mesh = core_cut = None
         if core:
-            if progress: progress("Building removable core…")
+            if progress: progress("Building removable core…", 0.22)
             core_mesh, core_cut, core_warnings = build_core(
                 core_fields, top_y=float(size[1]), fill_diameter=fill_diameter)
             self.warnings.extend(core_warnings)
@@ -862,7 +953,7 @@ class MoldGenerator:
             self.cavity_volume_mm3 + self.pour_channel_volume_mm3
         )
 
-        if progress: progress("Building fitted base…")
+        if progress: progress("Building fitted base…", 0.28)
         base_blank=radial_prism(profile,base_bottom,base_top,clearance)
         parts=[]
         # External base rim (fused into the bottom of every wall panel).
@@ -882,7 +973,8 @@ class MoldGenerator:
         base_mesh=base_blank
 
         for i in range(int(panels)):
-            if progress: progress(f"Generating cavity panel {i+1}/{panels}…")
+            if progress: progress(f"Generating cavity panel {i+1}/{panels}…",
+                                  0.30 + 0.65 * i / max(1, int(panels)))
             a0=i/panels*2*np.pi; a1=(i+1)/panels*2*np.pi
             blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
             panel=boolean([blank,cutter],"difference")
@@ -1045,6 +1137,11 @@ class MoldGenerator:
         if core_mesh is not None:
             # Core lifts straight up out of the mould when exploded.
             self.parts.append(MoldPart("Mold_Core",core_mesh,(0.0,1.0,0.0)))
+        bad = [p.name for p in self.parts if not p.mesh.is_watertight]
+        if bad:
+            self.warnings.append("These parts are not watertight and may slice badly: "
+                                 + ", ".join(bad) + ".")
+        if progress: progress("Done.", 1.0)
         return self.parts
 
     def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
@@ -1070,32 +1167,24 @@ class MoldGenerator:
         wall_height = sy + max(0.0, float(top_extra))
 
         if progress:
-            progress("Tracing STL silhouette and building contoured mould…")
+            progress("Tracing the model outline…", 0.1)
 
-        # Project every surface triangle onto the horizontal X/Z plane.
-        # The union of these projected triangles describes the model's
-        # actual footprint, including concave outlines, rather than its bounds.
-        projected = []
-        vertices = np.asarray(src.vertices)
-        for face in np.asarray(src.faces):
-            points = vertices[face][:, [0, 2]]
-            poly = Polygon(points)
-            if poly.is_valid and poly.area > 1e-7:
-                projected.append(poly)
-        if not projected:
-            raise ValueError("Could not extract a usable 2D outline from this STL.")
-
-        footprint = unary_union(projected).buffer(0)
+        # The union of every projected triangle describes the model's actual
+        # footprint, including concave outlines, rather than its bounds.
+        footprint = mesh_footprint(src)
         if footprint.is_empty:
             raise ValueError("The STL silhouette is empty.")
-        # A single continuous pour tray is required. If the projection has
-        # separate islands, join nearby islands using the requested margin.
+        # A single continuous pour tray is required. Islands closer than
+        # 2 x margin merge on their own; anything further apart is bridged so
+        # no model is left outside the tray.
         inner_shape = footprint.buffer(margin, join_style=1).buffer(0)
-        if inner_shape.geom_type == "MultiPolygon":
-            inner_shape = unary_union(list(inner_shape.geoms)).buffer(0)
+        inner_shape, bridges = join_islands(inner_shape, margin)
+        if bridges:
+            self.warnings.append(
+                f"The models are far apart, so {bridges} bridge{'s were' if bridges > 1 else ' was'} "
+                "added to join them into one tray. Move them closer together (Transform tab) "
+                "for a smaller mould and less silicone.")
         # Use the exterior silhouette for a clean, manufacturable tray wall.
-        if inner_shape.geom_type == "MultiPolygon":
-            inner_shape = max(inner_shape.geoms, key=lambda g: g.area)
         inner_shape = Polygon(inner_shape.exterior).buffer(0)
         outer_shape = inner_shape.buffer(wall, join_style=1).buffer(0)
         if outer_shape.geom_type == "MultiPolygon":
@@ -1176,7 +1265,7 @@ class MoldGenerator:
             return mesh
 
         if progress:
-            progress("Forming contoured base and perimeter wall…")
+            progress("Forming base and perimeter wall…", 0.5)
         # Build the tray from the grid (Y=0) up to the exact user-specified
         # base thickness.  The duck plug starts on that top face, so it is
         # raised by the full base thickness instead of remaining on the grid.
@@ -1196,6 +1285,7 @@ class MoldGenerator:
             label_text = (f"{silicone_ml:.0f}" if silicone_ml >= 100
                           else f"{silicone_ml:.1f}") + " ML"
             label_meshes = build_label_tab(outer_shape, wall, base_top, label_text)
+        if progress: progress("Fusing the tray and model…", 0.75)
         tray = boolean([base_mesh, walls_mesh, plug] + label_meshes, "union")
         tray.fix_normals()
         if not tray.is_watertight:
@@ -1233,18 +1323,5 @@ class MoldGenerator:
         self.profile = None
         self.plug = plug
         self.parts = [MoldPart("Flat_2D_Contoured_Negative_Mold", tray)]
+        if progress: progress("Done.", 1.0)
         return self.parts
-
-    def export_part(self, index, path):
-        transform_to_export(self.parts[index].mesh).export(path, file_type="stl")
-
-    def export_zip(self, path, exploded=0):
-        max_size=max(self.source.extents)
-        dist=(exploded/100)*(8+max(30,max_size*.30))*1.25
-        with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as zf:
-            for i,part in enumerate(self.parts):
-                mesh=part.mesh.copy()
-                if i:
-                    mesh.apply_translation(np.array(part.direction)*dist)
-                out=transform_to_export(mesh)
-                zf.writestr(part.name+".stl",out.export(file_type="stl"))

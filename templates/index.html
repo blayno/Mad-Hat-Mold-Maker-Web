@@ -13,9 +13,9 @@
   </header>
 
   <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="build" role="tab">Build</button>
-    <button class="tab" data-tab="preview" role="tab">Preview &amp; export</button>
-    <button class="tab" data-tab="transform" role="tab">Transform</button>
+    <button class="tab active" data-tab="build" role="tab" aria-selected="true">Build</button>
+    <button class="tab" data-tab="preview" role="tab" aria-selected="false">Preview &amp; export</button>
+    <button class="tab" data-tab="transform" role="tab" aria-selected="false">Transform</button>
   </nav>
 
   <!-- BUILD -->
@@ -81,7 +81,9 @@
 
     <div class="actionbar">
       <button id="generate" class="primary wide" disabled>Generate mould</button>
-      <div id="status" class="status">Upload an STL, OBJ or 3MF to begin.</div>
+      <progress id="genProgress" max="100" value="0" hidden style="width:100%"></progress>
+      <button id="cancelGen" class="danger wide" hidden>Cancel</button>
+      <div id="status" class="status" style="white-space:pre-line">Upload an STL, OBJ or 3MF to begin.</div>
     </div>
 
     <div class="group">
@@ -90,7 +92,9 @@
         <div class="stat key"><dt>Fills the model</dt><dd id="stlFill">—</dd></div>
         <div class="stat"><dt>Mix with 10% extra</dt><dd id="stlMix">—</dd></div>
       </dl>
-      <p class="muted small">Based on the volume of the source mesh, which must be watertight.</p>
+      <label class="field"><span class="lbl">Resin density</span>
+        <span class="inp"><input id="resin_density" type="number" value="1.05" min="0.1" max="5" step="0.01"><em>g/mL</em></span></label>
+      <p class="muted small">Based on the volume of the source mesh, which must be watertight. Check the density on your resin's data sheet.</p>
     </div>
 
     <div class="group">
@@ -102,6 +106,8 @@
         <div class="stat key"><dt>Total silicone</dt><dd id="capacity">—</dd></div>
         <div class="stat"><dt>Mix with 10% extra</dt><dd id="mix">—</dd></div>
       </dl>
+      <label class="field"><span class="lbl">Silicone density (mixed)</span>
+        <span class="inp"><input id="silicone_density" type="number" value="1.15" min="0.1" max="5" step="0.01"><em>g/mL</em></span></label>
       <p id="siliconeNote" class="muted small">Includes the silicone gap and pour channel without double-counting their overlap.</p>
     </div>
   </section>
