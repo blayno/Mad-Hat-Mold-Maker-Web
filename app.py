@@ -55,6 +55,7 @@ def status():
         parts=[{'index':i,'name':p.name,'direction':list(p.direction)} for i,p in enumerate(S.generator.parts)]
     return jsonify({'ok':True,'models':models,'parts':parts,'has_source':src is not None,
         'generated':S.generated,'source':mesh_info(src) if src is not None else None,
+        'flat':(S.generator.flat_stats if S.generated else None),
         'capacity':{'gap_ml':S.generator.cavity_volume_mm3/1000,
           'channel_ml':S.generator.pour_channel_volume_mm3/1000,
           'total_ml':S.generator.total_resin_volume_mm3/1000,
@@ -143,7 +144,8 @@ def generate():
         if style=='flat':
             if want_core: gen.warnings.append('Core: not available for 2D flat pour moulds, so it was skipped.')
             gen.generate_flat_2d(wall=float(d.get('wall',8)),base=float(d.get('base',6)),
-                top_extra=float(d.get('top_extra',8)),margin=float(d.get('margin',10)))
+                top_extra=float(d.get('top_extra',8)),margin=float(d.get('margin',10)),
+                label_tab=bool(d.get('label_tab',True)))
         else:
             gen.generate(panels=int(d.get('panels',4)),top_extra=float(d.get('top_extra',8)),
                 wall=float(d.get('wall',8)),base=float(d.get('base',6)),
@@ -270,6 +272,6 @@ def project_open():
     except Exception as e: return err(f'Could not open project: {e}')
 
 if __name__=='__main__':
-    print('\nMAD HAT Negative Mold Generator — Web Interface')
+    print('\nMAD HAT MOULDFORGE — Web Interface')
     print('Open http://127.0.0.1:5000 in your browser. Press Ctrl+C to stop.\n')
     app.run(host='127.0.0.1',port=5000,debug=False,threaded=True)

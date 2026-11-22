@@ -73,6 +73,112 @@ def boolean(meshes, operation):
     return result
 
 
+# --- Label tab (2D flat mould) ----------------------------------------------
+# A tiny 5x7 pixel font (digits, '.', 'M', 'L', space) so the mould can carry
+# its silicone amount as raised text without needing any font files.
+_PIXEL_FONT = {
+    "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+    "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+    "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+    "3": ["#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."],
+    "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+    "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+    "6": ["..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."],
+    "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+    "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+    "9": [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
+    ".": ["..", "..", "..", "..", "..", "##", "##"],
+    "M": ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+    "L": ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+    " ": ["...", "...", "...", "...", "...", "...", "..."],
+}
+
+
+def pixel_text_rects(text):
+    """Lay text out on a pixel grid.
+
+    Returns (rects, cols, rows). Each rect is (col0, col1, row0, row1) in grid
+    units (end-exclusive, row 0 = top row), with vertical runs already merged
+    so the text is built from as few boxes as possible.
+    """
+    runs = []
+    col = 0
+    for ch in text:
+        glyph = _PIXEL_FONT.get(ch)
+        if glyph is None:
+            continue
+        for r, line in enumerate(glyph):
+            c = 0
+            while c < len(line):
+                if line[c] == "#":
+                    c0 = c
+                    while c < len(line) and line[c] == "#":
+                        c += 1
+                    runs.append((col + c0, col + c, r))
+                else:
+                    c += 1
+        col += len(glyph[0]) + 1
+    rects = []
+    for c0, c1 in sorted({(a, b) for a, b, _ in runs}):
+        rows = sorted(r for a, b, r in runs if (a, b) == (c0, c1))
+        start = prev = rows[0]
+        for r in rows[1:]:
+            if r != prev + 1:
+                rects.append((c0, c1, start, prev + 1))
+                start = r
+            prev = r
+        rects.append((c0, c1, start, prev + 1))
+    return rects, max(0, col - 1), 7
+
+
+def build_label_tab(outer_shape, wall, base_top, text, text_height=1.0, pad=2.0):
+    """Flat tab on the top edge of the 2D mould with raised text on it.
+
+    "Top edge" is the top of the top-down view, i.e. the smallest engine Z
+    (the engine is Y-up and the preview/export rotate +90 deg about X, so text
+    laid out along +X with rows increasing in +Z reads correctly from above).
+    The tab is a floor-level plate that overlaps into the wall ring but never
+    enters the silicone well. Returns a list of meshes to union with the tray.
+    """
+    from shapely.geometry import LineString
+
+    rects, cols, rows = pixel_text_rects(text)
+    if not rects:
+        return []
+    minx, minz, maxx, maxz = outer_shape.bounds
+    # Shrink the pixel size on small moulds, but keep strokes printable.
+    avail = max(30.0, maxx - minx)
+    pitch = min(1.2, max(0.6, (avail - 2.0 * pad) / cols))
+    text_w, text_d = cols * pitch, rows * pitch
+    tab_w, tab_d = text_w + 2.0 * pad, text_d + 2.0 * pad
+
+    # Centre the tab on the outline vertices nearest the top edge, then find
+    # where the outline actually is at that X so the plate overlaps the wall.
+    coords = np.asarray(outer_shape.exterior.coords)
+    near_top = coords[coords[:, 1] <= minz + 1.0]
+    xc = float(near_top[:, 0].mean())
+    hit = LineString([(xc, minz - 1.0), (xc, maxz + 1.0)]).intersection(outer_shape)
+    if hit.is_empty:
+        xc = float(coords[np.argmin(coords[:, 1]), 0])
+        hit = LineString([(xc, minz - 1.0), (xc, maxz + 1.0)]).intersection(outer_shape)
+    z_loc = float(hit.bounds[1]) if not hit.is_empty else float(minz)
+
+    embed = wall * 0.5  # sink into the wall ring (ring is at least `wall` thick)
+    z_out = z_loc - tab_d
+    meshes = [box_mesh([tab_w, base_top, tab_d + embed],
+                       [xc, base_top / 2.0, (z_out + z_loc + embed) / 2.0])]
+    x0 = xc - text_w / 2.0
+    z0 = z_out + pad
+    h = text_height + 0.2  # sink 0.2 mm into the plate so it fuses cleanly
+    for c0, c1, r0, r1 in rects:
+        meshes.append(box_mesh(
+            [(c1 - c0) * pitch, h, (r1 - r0) * pitch],
+            [x0 + (c0 + c1) * pitch / 2.0,
+             base_top - 0.2 + h / 2.0,
+             z0 + (r0 + r1) * pitch / 2.0]))
+    return meshes
+
+
 def radial_profile(mesh, height, angle_count=144, y_count=48):
     """Conservative radial envelope of the model at sampled heights/angles."""
     v = mesh.vertices
@@ -625,6 +731,7 @@ class MoldGenerator:
         self.cavity_volume_mm3 = 0.0
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = 0.0
+        self.flat_stats = None  # filled by generate_flat_2d()
         self.warnings: list[str] = []
 
     def load_stl(self, path):
@@ -916,7 +1023,7 @@ class MoldGenerator:
         return self.parts
 
     def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
-                         progress=None):
+                         label_tab=True, progress=None):
         """Create a contour-following flat pour mould around the STL footprint.
 
         The well, perimeter wall and base follow the projected X/Z silhouette
@@ -1054,7 +1161,17 @@ class MoldGenerator:
                                     base_top + wall_height)
         plug = src.copy()
         plug.apply_translation([0.0, base_top, 0.0])
-        tray = boolean([base_mesh, walls_mesh, plug], "union")
+        # Label tab on the top edge carrying the silicone amount to fill the
+        # well (same figure the app reports as "Total silicone required").
+        label_meshes = []
+        label_text = None
+        if label_tab:
+            silicone_ml = max(0.0, float(inner_shape.area) * wall_height
+                              - abs(float(src.volume))) / 1000.0
+            label_text = (f"{silicone_ml:.0f}" if silicone_ml >= 100
+                          else f"{silicone_ml:.1f}") + " ML"
+            label_meshes = build_label_tab(outer_shape, wall, base_top, label_text)
+        tray = boolean([base_mesh, walls_mesh, plug] + label_meshes, "union")
         tray.fix_normals()
         if not tray.is_watertight:
             raise RuntimeError("The contour-following 2D mould did not produce a watertight solid.")
@@ -1072,9 +1189,20 @@ class MoldGenerator:
 
         # Silicone fills the contoured well around the raised STL plug.
         well_volume = float(inner_shape.area) * wall_height
-        self.cavity_volume_mm3 = max(0.0, well_volume - abs(float(src.volume)))
+        stl_volume = abs(float(src.volume))
+        self.cavity_volume_mm3 = max(0.0, well_volume - stl_volume)
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = self.cavity_volume_mm3
+        minx, minz, maxx, maxz = inner_shape.bounds
+        self.flat_stats = {
+            "footprint_area_mm2": float(inner_shape.area),
+            "footprint_x_mm": float(maxx - minx),
+            "footprint_z_mm": float(maxz - minz),
+            "fill_depth_mm": float(wall_height),
+            "well_volume_mm3": float(well_volume),
+            "stl_volume_mm3": float(stl_volume),
+            "label_text": label_text,
+        }
         self.base_top = base_top + actual_lift
         self.lift_y = actual_lift
         self.profile = None
