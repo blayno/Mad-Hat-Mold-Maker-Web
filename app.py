@@ -343,6 +343,8 @@ def parse_params(d):
         'style': style,
         'core': bool(d.get('core', False)),
         'panels': int(d.get('panels', 4)),
+        'cut_angles': d.get('cut_angles'),
+        'cut_positions': d.get('cut_positions'),
         'top_extra': float(d.get('top_extra', 8)),
         'wall': float(d.get('wall', 8)),
         'base': float(d.get('base', 6)),
@@ -377,7 +379,7 @@ def run_job(job, source, p, rev):
             gen.generate_flat_2d(wall=p['wall'], base=p['base'], top_extra=p['top_extra'],
                                  margin=p['margin'], label_tab=p['label_tab'], progress=progress)
         else:
-            gen.generate(panels=p['panels'], top_extra=p['top_extra'], wall=p['wall'],
+            gen.generate(panels=p['panels'], cut_angles=p['cut_angles'], cut_positions=p['cut_positions'], top_extra=p['top_extra'], wall=p['wall'],
                          base=p['base'], clearance=p['clearance'],
                          fill_diameter=p['fill_diameter'],
                          fill_depth_percent=p['fill_depth_percent'], core=p['core'],

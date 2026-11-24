@@ -41,13 +41,81 @@ scene.add(new THREE.AxesHelper(70));
 
 const loader=new STLLoader();
 let sourceMesh=null,partMeshes=[],partData=[],modelData=[],activeModel=0,selectedPart=0,sourceVisible=true,explode=0,sourceMaxSize=100,generated=false,flatMode=false,generating=false,hasSource=false,lastStatus=null;
-let sourceToken=0,partsToken=0;
+let sourceToken=0,partsToken=0,cutPlaneMeshes=[];
 const NOTE_3D='Includes the silicone gap and pour channel without double-counting their overlap.',NOTE_2D='Silicone fills the contoured well up to the top of the wall, minus the volume the original STL displaces.';
 const PART_COLORS=['#e34b91','#9b58e8','#d5ae45','#73c95d','#39b8a9','#8793a8','#e07848','#6b9fe0'];
 const IDENTITY_TF={scale:[1,1,1],rotate:[0,0,0],move:[0,0,0]};
 
 function mat(color,rough=.7){return new THREE.MeshStandardMaterial({color,roughness:rough,metalness:.05,side:THREE.DoubleSide,clippingPlanes:clipPlanes});}
 function clearParts(){for(const m of partMeshes){scene.remove(m);m.geometry.dispose();}partMeshes=[];partData=[];}
+
+// Preview the exact radial split planes used by the geometry engine.
+function clearCutPlanes(){for(const m of cutPlaneMeshes){scene.remove(m);m.geometry.dispose();m.material.dispose();}cutPlaneMeshes=[];}
+function cutPlaneOffsets(){
+  try{const a=JSON.parse($('cut_offsets')?.value||'[]');return Array.isArray(a)?a.map(v=>Array.isArray(v)?[Number(v[0])||0,Number(v[1])||0]:[0,0]):[];}catch(e){return [];}
+}
+function panelCount(){return Math.max(2,Math.min(8,Number($('panels')?.value)||4));}
+// A full vertical cut plane creates two opposing panel seams. Even panel
+// counts therefore need half as many planes; the legacy 5-panel option keeps
+// five independent radial seams because it cannot be made from diametral pairs.
+function cutPlaneCount(){const n=panelCount();return n%2===0?n/2:n;}
+function cutAnglesDegrees(){
+  const n=panelCount(),count=cutPlaneCount();
+  return Array.from({length:count},(_,i)=>i*(n%2===0?180:360)/count);
+}
+function syncCutPlaneControls(){
+  const count=cutPlaneCount();
+  let offsets=cutPlaneOffsets();if(offsets.length!==count)offsets=Array.from({length:count},()=>[0,0]);
+  $('cut_offsets').value=JSON.stringify(offsets);
+  const box=$('cutPlaneControls');box.innerHTML='';
+  offsets.forEach((v,i)=>{
+    const group=document.createElement('div');group.className='field';
+    const title=document.createElement('span');title.className='lbl';title.textContent=`Plane ${i+1} position`;
+    const row=document.createElement('div');row.className='grid2';
+    [['X',0],['Y',1]].forEach(([axis,idx])=>{
+      const wrap=document.createElement('label');wrap.className='field';
+      const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=axis+' movement';
+      const inp=document.createElement('span');inp.className='inp';
+      const input=document.createElement('input');input.type='number';input.step='0.5';input.min='-200';input.max='200';input.value=(v[idx]||0).toFixed(1);input.setAttribute('aria-label',`Plane ${i+1} ${axis} movement in mm`);
+      const unit=document.createElement('em');unit.textContent='mm';
+      input.addEventListener('input',()=>{const next=cutPlaneOffsets();next[i][idx]=Math.max(-200,Math.min(200,Number(input.value)||0));$('cut_offsets').value=JSON.stringify(next);refreshCutPlanePositions();saveSettings();});
+      inp.append(input,unit);wrap.append(lbl,inp);row.append(wrap);
+    });
+    group.append(title,row);box.append(group);
+  });
+}
+function refreshCutPlanePositions(){
+  if(!sourceMesh||!cutPlaneMeshes.length)return;
+  const offsets=cutPlaneOffsets();const box=new THREE.Box3().setFromObject(sourceMesh);const center=box.getCenter(new THREE.Vector3());
+  cutPlaneMeshes.forEach((mesh,i)=>{const v=offsets[i]||[0,0];mesh.position.x=center.x+v[0];mesh.position.y=center.y+v[1];});
+}
+function updateCutPlanes(){
+  clearCutPlanes();
+  if(!sourceMesh||generated||flatMode||$('style')?.value!=='multi'||!$('showCutPlanes')?.checked)return;
+  const angles=cutAnglesDegrees(),count=angles.length;
+  const box=new THREE.Box3().setFromObject(sourceMesh),size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+  const radius=Math.max(size.x,size.y,size.z,10)*1.25;
+  const base=Math.max(0,Number($('base')?.value)||6),extra=Math.max(0,Number($('top_extra')?.value)||8);
+  const height=size.z+base+extra;
+  const planeCenter=new THREE.Vector3(center.x,center.y,(box.min.z+box.max.z+extra+base)/2);
+  const offsets=cutPlaneOffsets();
+  const material=new THREE.MeshBasicMaterial({color:0xff2525,transparent:true,opacity:.24,side:THREE.DoubleSide,depthWrite:false});
+  for(let i=0;i<count;i++){
+    const a=angles[i]*Math.PI/180;
+    const radial=new THREE.Vector3(Math.sin(a),-Math.cos(a),0).normalize();
+    const vertical=new THREE.Vector3(0,0,1);
+    const normal=new THREE.Vector3().crossVectors(radial,vertical).normalize();
+    const basis=new THREE.Matrix4().makeBasis(radial,vertical,normal);
+    const mesh=new THREE.Mesh(new THREE.PlaneGeometry(radius*2,height),material.clone());
+    mesh.quaternion.setFromRotationMatrix(basis);
+    const v=offsets[i]||[0,0];mesh.position.copy(planeCenter).add(new THREE.Vector3(v[0],v[1],0));
+    mesh.renderOrder=5;mesh.userData.cutPlaneIndex=i;scene.add(mesh);cutPlaneMeshes.push(mesh);
+  }
+}
+
+// Cut planes are intentionally NOT draggable in the 3D preview. The preview
+// remains dedicated to orbit/pan/zoom; plane positions are changed only through
+// the X/Y numeric settings above and reflected here by refreshCutPlanePositions().
 
 // Creased normals: smooth shading on curved walls, crisp edges on flanges and caps.
 function addSTL(url,material){return new Promise((resolve,reject)=>loader.load(url,g=>{
@@ -77,11 +145,11 @@ function fmt(v){return Number(v||0).toFixed(2);}
 
 // ---------------------------------------------------------------- settings
 // Mould settings persist in localStorage and travel inside project files.
-const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','wall_style','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','key_width','key_depth','project_name'];
-const SETTING_CHECKS=['core_enabled','label_tab'];
+const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','wall_style','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','key_width','key_depth','cut_offsets','project_name'];
+const SETTING_CHECKS=['core_enabled','label_tab','showCutPlanes'];
 const SETTINGS_KEY='madhat.settings.v1';
 function getSettings(){const s={};SETTING_FIELDS.forEach(id=>s[id]=$(id).value);SETTING_CHECKS.forEach(id=>s[id]=$(id).checked);return s;}
-function applySettings(s){if(!s||typeof s!=='object')return;SETTING_FIELDS.forEach(id=>{if(s[id]!==undefined&&s[id]!==null)$(id).value=s[id];});SETTING_CHECKS.forEach(id=>{if(typeof s[id]==='boolean')$(id).checked=s[id];});syncCore();syncName();syncSilicone();}
+function applySettings(s){if(!s||typeof s!=='object')return;SETTING_FIELDS.forEach(id=>{if(s[id]!==undefined&&s[id]!==null)$(id).value=s[id];});SETTING_CHECKS.forEach(id=>{if(typeof s[id]==='boolean')$(id).checked=s[id];});syncCore();syncName();syncSilicone();if($('cutPlaneControls'))syncCutPlaneControls();}
 function saveSettings(){try{localStorage.setItem(SETTINGS_KEY,JSON.stringify(getSettings()));}catch(e){}}
 function restoreSettings(){try{applySettings(JSON.parse(localStorage.getItem(SETTINGS_KEY)||'null'));}catch(e){}}
 
@@ -143,7 +211,7 @@ async function refreshStatus(){
   $('empty').hidden=d.models.length>0;
   $('generate').disabled=!d.has_source||generating;
   ['saveProject','deleteAll','showAll','deleteSelected','duplicate'].forEach(id=>$(id).disabled=!d.models.length);
-  lastStatus=d;renderStats(d);
+  lastStatus=d;renderStats(d);updateCutPlanes();
   if(d.generated){
     await renderParts(d.parts);
   }else{
@@ -216,6 +284,7 @@ async function refreshSource(){
     m.position.z=0;
     m.updateMatrixWorld(true);m.visible=sourceVisible;scene.add(m);sourceMesh=m;
   }
+  updateCutPlanes();
   updateInfo();
 }
 
@@ -343,7 +412,7 @@ async function finishJob(j){
   }
 }
 $('generate').onclick=async()=>{
-  const d={style:$('style').value,panels:+$('panels').value,wall_style:$('wall_style').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,key_width:+$('key_width').value,key_depth:+$('key_depth').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
+  const d={style:$('style').value,panels:+$('panels').value,cut_angles:Array.from({length:panelCount()},(_,i)=>i*360/panelCount()),cut_positions:cutPlaneOffsets().map(([x,y])=>[x,-y]),wall_style:$('wall_style').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,key_width:+$('key_width').value,key_depth:+$('key_depth').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
   saveSettings();
   try{
     await post('/api/generate',d);
@@ -352,9 +421,24 @@ $('generate').onclick=async()=>{
 };
 $('cancelGen').onclick=async()=>{$('cancelGen').disabled=true;try{await post('/api/generate/cancel',{});}catch(e){}};
 
-const syncCore=()=>{const flat=$('style').value==='flat';document.body.dataset.style=flat?'flat':'multi';$('core_enabled').disabled=flat;$('label_tab').disabled=!flat;if(flat)$('core_enabled').checked=false;};
-$('style').onchange=syncCore;syncCore();
+const syncCore=()=>{
+  const flat=$('style').value==='flat';
+  document.body.dataset.style=flat?'flat':'multi';
+  // Explicitly show only the controls belonging to the selected mould mode.
+  document.querySelectorAll('[data-only]').forEach(el=>{el.hidden=el.dataset.only!==(flat?'flat':'multi');});
+  $('core_enabled').disabled=flat;$('label_tab').disabled=!flat;
+  if(flat)$('core_enabled').checked=false;
+  // Remove the red cut-plane overlays immediately when switching to 2D mode.
+  updateCutPlanes();
+};
+$('style').addEventListener('change',syncCore);
+syncCore();
 [...SETTING_FIELDS,...SETTING_CHECKS].forEach(id=>$(id).addEventListener('change',saveSettings));
+$('panels').addEventListener('change',()=>{syncCutPlaneControls();updateCutPlanes();saveSettings();});
+['style','base','top_extra','showCutPlanes'].forEach(id=>{
+  $(id).addEventListener('input',updateCutPlanes);
+  $(id).addEventListener('change',updateCutPlanes);
+});
 
 // -------------------------------------------------------------- view/export
 $('showSource').onchange=()=>{sourceVisible=$('showSource').checked;if(sourceMesh)sourceMesh.visible=sourceVisible;};
@@ -465,7 +549,7 @@ function updateCut(){
 $('cut').addEventListener('input',updateCut);
 
 // -------------------------------------------------------------------- start
-restoreSettings();syncSilicone();renderPresets('');updateBedGrid();updateCut();
+restoreSettings();syncSilicone();syncCutPlaneControls();renderPresets('');updateBedGrid();updateCut();
 (async()=>{
   try{
     await refreshStatus();syncTransformFields();await refreshSource();fitCamera();

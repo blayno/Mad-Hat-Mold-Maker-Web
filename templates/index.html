@@ -64,9 +64,17 @@
 
       <div class="grid2">
         <label class="field" data-only="multi"><span class="lbl">Removable panels</span>
-          <select id="panels"><option>2</option><option selected>4</option><option>5</option><option>6</option><option>8</option></select></label>
+          <select id="panels"><option>2</option><option selected>4</option><option>6</option><option>8</option></select></label>
         <label class="field" data-only="multi"><span class="lbl">Outer wall</span>
           <select id="wall_style"><option value="offset" selected>Follows the model (uniform thickness)</option><option value="radial">Round envelope (legacy)</option></select></label>
+        <div class="field" data-only="multi" style="grid-column:1/-1;border:1px solid #444;border-radius:8px;padding:10px;margin-top:6px">
+          <span class="lbl">3D mould cut plane settings</span>
+          <label class="check" style="margin:8px 0"><input id="showCutPlanes" type="checkbox" checked><span>Show red cut planes on STL preview<small>Visual guide only. The preview remains dedicated to camera orbit, pan and zoom.</small></span></label>
+          <span class="lbl">Plane positions · millimetres</span>
+          <div id="cutPlaneControls" class="grid2"></div>
+          <input id="cut_offsets" type="hidden" value="">
+          <small class="muted">Move each plane using the X and Y settings above. Do not drag the planes in the visualiser. The generated 3D mould uses these exact positions.</small>
+        </div>
         <label class="field" data-only="flat"><span class="lbl">Margin around model</span>
           <span class="inp"><input id="margin" type="number" value="10" min="2" max="100" step="1"><em>mm</em></span></label>
       </div>

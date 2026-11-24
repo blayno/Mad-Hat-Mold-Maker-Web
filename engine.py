@@ -773,13 +773,14 @@ def surface_from_sdf(fields, level):
     return out
 
 
-def key_slab(angle, y0, y1, radius, width):
+def key_slab(angle, y0, y1, radius, width, offset=0.0):
     """Box on the seam plane at `angle`: `width` wide across the seam, 0..radius out."""
     t = np.array([math.cos(angle), 0.0, -math.sin(angle)])      # across the seam
     rad = np.array([math.sin(angle), 0.0, math.cos(angle)])     # along the seam, outward
     m = np.eye(4)
     m[:3, 0], m[:3, 1], m[:3, 2] = t, [0.0, 1.0, 0.0], rad
-    m[:3, 3] = rad * radius / 2.0 + np.array([0.0, (y0 + y1) / 2.0, 0.0])
+    normal = np.array([math.cos(angle), 0.0, -math.sin(angle)])
+    m[:3, 3] = rad * radius / 2.0 + normal * float(offset) + np.array([0.0, (y0 + y1) / 2.0, 0.0])
     return trimesh.creation.box(extents=[float(width), float(y1 - y0), float(radius)], transform=m)
 
 
@@ -866,6 +867,66 @@ def wedge_prism(a0, a1, y0, y1, radius):
         return cyl
     verts, faces = wedge_prism_arrays(a0, a1, y0, y1, radius)
     out = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    out.fix_normals()
+    return out
+
+
+def translated_wedge_prism(a0, a1, off0, off1, y0, y1, radius):
+    """Extrude a sector bounded by two vertically translated cut planes.
+
+    The seam planes remain vertical and retain their original directions, but
+    each can move in the horizontal X/Z plane. The resulting convex footprint
+    is clipped from a circular envelope by the two actual offset seam lines.
+    """
+    n = max(96, int(math.ceil(2 * math.pi * radius / 2.0)))
+    poly = [(radius * math.cos(2 * math.pi * k / n),
+             radius * math.sin(2 * math.pi * k / n)) for k in range(n)]
+
+    def clip(points, a, offset, keep_le=True):
+        # cross(direction(a), point) + offset = 0 is the translated seam.
+        dx, dz = math.sin(a), math.cos(a)
+        def value(pt):
+            v = dx * pt[1] - dz * pt[0] + offset
+            return v if keep_le else -v
+        if not points:
+            return []
+        out=[]
+        prev=points[-1]; fp=value(prev)
+        for cur in points:
+            fc=value(cur)
+            if (fp <= 1e-9) != (fc <= 1e-9):
+                t=fp/(fp-fc)
+                out.append((prev[0]+t*(cur[0]-prev[0]), prev[1]+t*(cur[1]-prev[1])))
+            if fc <= 1e-9:
+                out.append(cur)
+            prev,fp=cur,fc
+        return out
+
+    # Panel i lies counter-clockwise between its lower and upper seam.
+    poly = clip(poly, a0, float(off0), True)
+    poly = clip(poly, a1, float(off1), False)
+    # Clipping can emit the same vertex twice when an original circle vertex
+    # lies exactly on a seam. Remove consecutive duplicates before meshing.
+    cleaned=[]
+    for point in poly:
+        if not cleaned or math.hypot(point[0]-cleaned[-1][0], point[1]-cleaned[-1][1]) > 1e-7:
+            cleaned.append(point)
+    if len(cleaned)>2 and math.hypot(cleaned[0][0]-cleaned[-1][0], cleaned[0][1]-cleaned[-1][1]) <= 1e-7:
+        cleaned.pop()
+    poly=cleaned
+    if len(poly) < 3:
+        raise ValueError("The moved cut planes leave a panel with no usable area. Move the planes closer to their original positions.")
+    m=len(poly)
+    verts=np.asarray([[x,y0,z] for x,z in poly]+[[x,y1,z] for x,z in poly],dtype=float)
+    faces=[]
+    # Convex polygon caps, triangulated as fans.
+    for k in range(1,m-1):
+        faces.append([0,k+1,k])
+        faces.append([m,m+k,m+k+1])
+    for k in range(m):
+        j=(k+1)%m
+        faces.append([k,j,m+j]); faces.append([k,m+j,m+k])
+    out=trimesh.Trimesh(vertices=verts,faces=np.asarray(faces,dtype=np.int64),process=True)
     out.fix_normals()
     return out
 
@@ -1043,10 +1104,48 @@ class MoldGenerator:
     def generate(self, panels=4, top_extra=8, wall=8, base=6, clearance=3,
                  fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
                  rim_thickness=1.5, wall_style="offset", key_width=3.5, key_depth=2.0,
-                 progress=None):
+                 progress=None, cut_angles=None, cut_positions=None):
         if self.source is None:
             raise ValueError("Load an STL first.")
+        # Work on a private copy: generation recentres and transforms the mesh,
+        # and the cut-plane range validation below needs its original extents.
         src = self.source.copy()
+        panels = int(panels)
+        if panels < 2 or panels > 8:
+            raise ValueError("Panel count must be between 2 and 8.")
+        if cut_angles is None:
+            seam_angles = [i / panels * 2.0 * math.pi for i in range(panels)]
+        else:
+            try:
+                raw_angles = [float(a) % 360.0 for a in cut_angles]
+            except (TypeError, ValueError):
+                raise ValueError("Cut plane angles must be valid numbers.")
+            if len(raw_angles) != panels or not np.all(np.isfinite(raw_angles)):
+                raise ValueError("The number of cut plane angles must match the panel count.")
+            raw_angles.sort()
+            gaps = [((raw_angles[(i + 1) % panels] - raw_angles[i]) % 360.0)
+                    for i in range(panels)]
+            if min(gaps) < 1.0:
+                raise ValueError("Cut planes must remain at least 1 degree apart.")
+            seam_angles = [math.radians(a) for a in raw_angles]
+        # A complete vertical plane makes two opposing cuts. For even panel
+        # counts, accept one position per intersecting plane and mirror that
+        # position onto its opposite seam. The 5-panel legacy mode retains its
+        # five independent seam positions because those cuts are not diametral.
+        plane_count = panels // 2 if panels % 2 == 0 else panels
+        if cut_positions is None:
+            plane_positions = [(0.0, 0.0)] * plane_count
+        else:
+            try:
+                plane_positions = [(float(v[0]), float(v[1])) for v in cut_positions]
+            except (TypeError, ValueError, IndexError):
+                raise ValueError("Each cut plane needs valid X and Y movement values.")
+            if len(plane_positions) != plane_count or not np.all(np.isfinite(np.asarray(plane_positions))):
+                raise ValueError(f"This {panels}-panel mould requires {plane_count} cut plane position(s).")
+            if any(math.hypot(x, z) > 0.45 * max(src.extents[0], src.extents[2], 1.0) for x, z in plane_positions):
+                raise ValueError("A cut plane has been moved too far from the model centre.")
+        seam_offsets = ([plane_positions[i % plane_count] for i in range(panels)]
+                        if panels % 2 == 0 else list(plane_positions))
         # The wall envelope, pour hole and panels are all built around the
         # vertical axis through the origin, so centre the (possibly multi-model)
         # source on its bounding box and sit it on Y=0.
@@ -1182,8 +1281,10 @@ class MoldGenerator:
                 key_deep.apply_translation([0, base_top, 0])
                 slab_r = float(np.hypot(key_deep.vertices[:, 0], key_deep.vertices[:, 2]).max()) + 5.0
                 for k in range(int(panels)):
-                    seam = k / panels * 2 * np.pi
-                    slab = key_slab(seam, base_top, y_max, slab_r, key_width)
+                    seam = seam_angles[k]
+                    off_x, off_z = seam_offsets[k]
+                    seam_offset = math.cos(seam) * off_x - math.sin(seam) * off_z
+                    slab = key_slab(seam, base_top, y_max, slab_r, key_width, seam_offset)
                     kc = boolean([key_deep, slab], "intersection")
                     if kc is None or len(kc.faces) == 0:
                         continue
@@ -1210,7 +1311,7 @@ class MoldGenerator:
                         base_top,
                         min(kc_top - 1.0, hole_bottom_y - 1.0),
                     )
-                    ext = key_slab(seam, ext_y0, y_max + 0.5, r_ext, key_width)
+                    ext = key_slab(seam, ext_y0, y_max + 0.5, r_ext, key_width, seam_offset)
                     kc = boolean([kc, ext], "union")
                     key_cuts[k] = kc
                     extra = boolean([kc, cutter], "difference")
@@ -1277,16 +1378,29 @@ class MoldGenerator:
         for i in range(int(panels)):
             if progress: progress(f"Generating cavity panel {i+1}/{panels}…",
                                   0.30 + 0.65 * i / max(1, int(panels)))
-            a0=i/panels*2*np.pi; a1=(i+1)/panels*2*np.pi
+            a0=seam_angles[i]; a1=seam_angles[(i+1)%panels]
+            if a1 <= a0:
+                a1 += 2.0 * math.pi
+            # Plane movement is X/Z in the engine's horizontal plane. Only the
+            # component normal to each plane changes its cut location.
+            p0x,p0z=seam_offsets[i]; p1x,p1z=seam_offsets[(i+1)%panels]
+            off0=math.cos(a0)*p0x-math.sin(a0)*p0z
+            off1=math.cos(a1)*p1x-math.sin(a1)*p1z
             if use_offset:
                 # Offset wall above the base, plus the fitted ring around the base disc.
-                wedge = wedge_prism(a0, a1, base_top, y_max, env_radius)
+                wedge = translated_wedge_prism(a0, a1, off0, off1, base_top, y_max, env_radius)
                 upper = boolean([env_full, wedge], "intersection")
                 ring = annular_panel(profile, a0, a1, y_min, base_top + 0.5,
                                      wall, clearance, base_top)
+                ring_cut = translated_wedge_prism(a0, a1, off0, off1,
+                                                  y_min - 0.5, base_top + 1.0, env_radius)
+                ring = boolean([ring, ring_cut], "intersection")
                 blank = boolean([ring, upper], "union")
             else:
                 blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
+                moved_wedge = translated_wedge_prism(a0, a1, off0, off1,
+                                                     y_min - 0.5, y_max + 0.5, env_radius)
+                blank = boolean([blank, moved_wedge], "intersection")
             panel=boolean([blank,cutter],"difference")
             for seam in (i, (i + 1) % int(panels)):
                 if key_cuts[seam] is not None:
@@ -1391,6 +1505,11 @@ class MoldGenerator:
                         )
                         flange = boolean([flange, socket], "difference")
 
+                # Carry the complete flange, seal and locating features with
+                # the translated mating cut plane.
+                seam_offset = off0 if edge == 0 else off1
+                flange.apply_translation([math.cos(angle) * seam_offset,
+                                          0.0, -math.sin(angle) * seam_offset])
                 panel = boolean([panel, flange], "union")
 
             if rim_cut is not None:
