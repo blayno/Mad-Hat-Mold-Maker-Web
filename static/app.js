@@ -77,7 +77,7 @@ function fmt(v){return Number(v||0).toFixed(2);}
 
 // ---------------------------------------------------------------- settings
 // Mould settings persist in localStorage and travel inside project files.
-const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','project_name'];
+const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','wall_style','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','project_name'];
 const SETTING_CHECKS=['core_enabled','label_tab'];
 const SETTINGS_KEY='madhat.settings.v1';
 function getSettings(){const s={};SETTING_FIELDS.forEach(id=>s[id]=$(id).value);SETTING_CHECKS.forEach(id=>s[id]=$(id).checked);return s;}
@@ -339,7 +339,7 @@ async function finishJob(j){
   }
 }
 $('generate').onclick=async()=>{
-  const d={style:$('style').value,panels:+$('panels').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
+  const d={style:$('style').value,panels:+$('panels').value,wall_style:$('wall_style').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
   saveSettings();
   try{
     await post('/api/generate',d);

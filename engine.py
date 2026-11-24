@@ -749,6 +749,100 @@ def build_core(fields, top_y, fill_diameter, cap_height=3.0):
     return core, cut, warnings
 
 
+# --- Uniform-thickness outer wall (offset envelope) -------------------------
+def wedge_prism_arrays(a0, a1, y0, y1, radius):
+    """Vertices/faces of a closed pie-slice prism (apex on the Y axis)."""
+    n = max(4, int(math.ceil(abs(a1 - a0) / (math.pi / 72.0))))
+    ang = a0 + (a1 - a0) * np.arange(n + 1) / n
+    arc = np.stack([np.sin(ang) * radius, np.cos(ang) * radius], axis=-1)
+    verts = [[0.0, y0, 0.0]] + [[x, y0, z] for x, z in arc]
+    verts += [[0.0, y1, 0.0]] + [[x, y1, z] for x, z in arc]
+    verts = np.asarray(verts, dtype=float)
+    b0, t0 = 0, n + 2
+    bk = lambda k: 1 + k            # bottom arc point k
+    tk = lambda k: n + 3 + k        # top arc point k
+    faces = []
+    for k in range(n):
+        faces.append([b0, bk(k + 1), bk(k)])                     # bottom fan
+        faces.append([t0, tk(k), tk(k + 1)])                     # top fan
+        faces.append([bk(k), bk(k + 1), tk(k + 1)])              # curved side
+        faces.append([bk(k), tk(k + 1), tk(k)])
+    faces.append([b0, bk(0), tk(0)]); faces.append([b0, tk(0), t0])      # side at a0
+    faces.append([b0, t0, tk(n)]);    faces.append([b0, tk(n), bk(n)])   # side at a1
+    return verts, np.asarray(faces, dtype=np.int64)
+
+
+def wedge_prism(a0, a1, y0, y1, radius):
+    if abs(a1 - a0) >= 2 * math.pi - 1e-6:       # single full-circle "panel"
+        cyl = vertical_cylinder(radius, y1 - y0, sections=144)
+        cyl.apply_translation([0, (y0 + y1) / 2.0, 0])
+        return cyl
+    verts, faces = wedge_prism_arrays(a0, a1, y0, y1, radius)
+    out = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    out.fix_normals()
+    return out
+
+
+def envelope_profile(fields, wall, clearance, height, boss=None,
+                     angle_count=144, rows=96):
+    """Radial profile (same format as radial_profile) of the uniform offset wall.
+
+    `fields` come from offset_model(..., return_fields=True) run at
+    clearance + wall.  The outer radius at every (height, angle) is the outermost
+    occupied voxel along that ray, so it follows the real offset surface rather
+    than the old smoothed vertex envelope.  It is stored the way the flange, nub
+    and seal code expect it (outer + clearance + wall + reserve == wall surface).
+    The base disc radius is the wall surface at the model's bottom minus `wall`,
+    so the ring around the base is exactly `wall` thick.
+    """
+    mask = np.asarray(fields["offset_volume"], dtype=bool)
+    pitch = float(fields["pitch"])
+    origin = np.asarray(fields["origin"], dtype=float)
+    nx, ny, nz = mask.shape
+    ys = np.linspace(0.0, float(height), rows + 1)
+    jj = np.rint((ys - origin[1]) / pitch).astype(int)
+    valid_y = (jj >= 0) & (jj < ny)
+    jj = np.clip(jj, 0, ny - 1)
+    xmax = max(abs(origin[0]), abs(origin[0] + (nx - 1) * pitch))
+    zmax = max(abs(origin[2]), abs(origin[2] + (nz - 1) * pitch))
+    K = int(math.ceil(math.hypot(xmax, zmax) / pitch)) + 1
+    r = np.arange(K + 1) * pitch
+    angs = np.arange(angle_count) / angle_count * 2 * np.pi
+    ii = np.rint((r[None, :] * np.sin(angs)[:, None] - origin[0]) / pitch).astype(int)
+    ll = np.rint((r[None, :] * np.cos(angs)[:, None] - origin[2]) / pitch).astype(int)
+    inb = (ii >= 0) & (ii < nx) & (ll >= 0) & (ll < nz)
+    ii = np.clip(ii, 0, nx - 1); ll = np.clip(ll, 0, nz - 1)
+
+    outer = np.full((rows + 1, angle_count), np.nan)
+    for row in range(rows + 1):
+        if not valid_y[row]:
+            continue
+        inside = mask[ii, jj[row], ll] & inb               # (angles, K+1)
+        any_in = inside.any(axis=1)
+        last = K - np.argmax(inside[:, ::-1], axis=1)      # outermost occupied sample
+        outer[row, any_in] = r[last][any_in] + 0.5 * pitch
+    if not np.isfinite(outer).any():
+        raise RuntimeError("Could not measure the outer wall from the offset solid.")
+    rr = np.arange(rows + 1)
+    for a in range(angle_count):
+        col = outer[:, a]; ok = np.isfinite(col)
+        if ok.any():
+            outer[:, a] = np.interp(rr, rr[ok], col[ok])   # clamps to nearest valid row
+    outer[~np.isfinite(outer)] = np.nanmax(outer)
+    # One conservative smoothing pass (never moves the wall inward).
+    avg = (outer * 4 + np.roll(outer, 1, axis=1) + np.roll(outer, -1, axis=1)
+           + np.vstack([outer[:1], outer[:-1]]) + np.vstack([outer[1:], outer[-1:]])) / 8
+    outer = np.maximum(outer, avg)
+    if boss is not None:                      # pour boss: (radius, source-y where it starts)
+        outer[ys >= float(boss[1]) - 1e-6] = np.maximum(
+            outer[ys >= float(boss[1]) - 1e-6], float(boss[0]))
+    base_edge = np.maximum(2.0, outer[0] - float(wall))
+    inner = np.tile(base_edge - float(clearance), (rows + 1, 1))
+    reserve = max(5.0, float(wall) * 0.55)
+    return {"inner": inner, "outer": outer - float(clearance) - float(wall) - reserve,
+            "height": float(height), "angles": angle_count, "rows": rows}
+
+
 def transform_to_export(mesh):
     """Application Y-up to printer STL Z-up, keeping the bottom at Z=0."""
     out = mesh.copy()
@@ -859,7 +953,7 @@ class MoldGenerator:
 
     def generate(self, panels=4, top_extra=8, wall=8, base=6, clearance=3,
                  fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
-                 rim_thickness=1.5, progress=None):
+                 rim_thickness=1.5, wall_style="offset", progress=None):
         if self.source is None:
             raise ValueError("Load an STL first.")
         src = self.source.copy()
@@ -883,8 +977,9 @@ class MoldGenerator:
         base_top=base_bottom+actual_base
         self.base_top = base_top
         y_max=base_top+size[1]+max(0,float(top_extra))
-        profile=radial_profile(src,size[1])
-        self.profile=profile
+        use_offset = str(wall_style) != "radial"
+        profile = None if use_offset else radial_profile(src, size[1])
+        self.profile = profile
         self.warnings = []
         if progress: progress("Building the cavity offset (the slow step on big models)…", 0.06)
         cutter, core_fields = offset_model(src, clearance, return_fields=True)
@@ -920,6 +1015,32 @@ class MoldGenerator:
             if core_mesh is not None:
                 core_mesh.apply_translation([0, base_top, 0])
                 core_cut.apply_translation([0, base_top, 0])
+
+        # Uniform-thickness outer wall: the cavity offset pushed out by `wall`, so the
+        # mould wall follows the model instead of a radial envelope.
+        env_full = None
+        env_radius = 0.0
+        if use_offset:
+            if progress: progress("Building the uniform-thickness outer wall…", 0.24)
+            hole_diameter = float(fill_diameter)
+            if not np.isfinite(hole_diameter) or hole_diameter <= 0:
+                raise ValueError("Fill hole diameter must be a positive number.")
+            env, env_fields = offset_model(src, clearance + wall, return_fields=True)
+            # The wall cannot rise above the offset solid's own top.
+            y_max = min(y_max, base_top + float(env.bounds[1, 1]))
+            pour_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
+            boss_h = min(pour_depth, max(10.0, float(top_extra) + wall))
+            boss_r = hole_diameter / 2.0 + max(3.0, wall * 0.5)
+            profile = envelope_profile(env_fields, wall, clearance, y_max - base_top,
+                                       boss=(boss_r, (y_max - boss_h) - base_top))
+            self.profile = profile
+            env_fields = None
+            env.apply_translation([0, base_top, 0])
+            # Pour boss: keeps a solid collar around the sprue where the wall is thin.
+            boss = vertical_cylinder(radius=boss_r, height=boss_h + 1.0, sections=96)
+            boss.apply_translation([0, y_max - boss_h / 2.0 + 0.5, 0])
+            env_full = boolean([env, boss], "union")
+            env_radius = float(np.hypot(env_full.vertices[:, 0], env_full.vertices[:, 2]).max()) + 5.0
 
         # Calculate the pour channel's additional volume. The channel is
         # counted only where it lies outside the expanded model envelope,
@@ -976,7 +1097,15 @@ class MoldGenerator:
             if progress: progress(f"Generating cavity panel {i+1}/{panels}…",
                                   0.30 + 0.65 * i / max(1, int(panels)))
             a0=i/panels*2*np.pi; a1=(i+1)/panels*2*np.pi
-            blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
+            if use_offset:
+                # Offset wall above the base, plus the fitted ring around the base disc.
+                wedge = wedge_prism(a0, a1, base_top, y_max, env_radius)
+                upper = boolean([env_full, wedge], "intersection")
+                ring = annular_panel(profile, a0, a1, y_min, base_top + 0.5,
+                                     wall, clearance, base_top)
+                blank = boolean([ring, upper], "union")
+            else:
+                blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
             panel=boolean([blank,cutter],"difference")
             if core_cut is not None:
                 # Bore the panel so the removable core passes through it.

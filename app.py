@@ -349,6 +349,7 @@ def parse_params(d):
         'fill_depth_percent': float(d.get('fill_depth_percent', 50)),
         'rim_width': float(d.get('rim_width', 2.5)),
         'rim_thickness': float(d.get('rim_thickness', 1.5)),
+        'wall_style': d.get('wall_style', 'offset') if d.get('wall_style', 'offset') in ('offset', 'radial') else 'offset',
         'margin': float(d.get('margin', 10)),
         'label_tab': bool(d.get('label_tab', True)),
     }
@@ -377,7 +378,7 @@ def run_job(job, source, p, rev):
                          fill_diameter=p['fill_diameter'],
                          fill_depth_percent=p['fill_depth_percent'], core=p['core'],
                          rim_width=p['rim_width'], rim_thickness=p['rim_thickness'],
-                         progress=progress)
+                         wall_style=p['wall_style'], progress=progress)
         if job.cancel:
             raise JobCancelled()
         with LOCK:
