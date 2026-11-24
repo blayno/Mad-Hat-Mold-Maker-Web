@@ -1160,6 +1160,18 @@ class MoldGenerator:
             env_full = boolean([env, boss], "union")
             env_radius = float(np.hypot(env_full.vertices[:, 0], env_full.vertices[:, 2]).max()) + 5.0
 
+        # Keep the locating-slot extension aligned with the same pour-hole
+        # diameter/depth settings in both offset and radial wall modes.
+        hole_diameter = float(fill_diameter)
+        if not np.isfinite(hole_diameter) or hole_diameter <= 0:
+            raise ValueError("Fill hole diameter must be a positive number.")
+
+        # Keep the locating-slot extension aligned with the same pour-hole
+        # diameter/depth settings in both offset and radial wall modes.
+        hole_diameter = float(fill_diameter)
+        if not np.isfinite(hole_diameter) or hole_diameter <= 0:
+            raise ValueError("Fill hole diameter must be a positive number.")
+
         key_cuts = [None] * max(1, int(panels))
         self.key_volume_mm3 = 0.0
         if key_on:
@@ -1175,16 +1187,31 @@ class MoldGenerator:
                     kc = boolean([key_deep, slab], "intersection")
                     if kc is None or len(kc.faces) == 0:
                         continue
-                    # The groove only follows the cavity surface, which ends a little above
-                    # the model.  Carry it straight up through the top of the mould as a
-                    # slot (same width) from the pour hole out to the end of the groove.
+                    # Continue each cavity locating groove as a continuous slot
+                    # to the mould top AND down into the pour-hole opening.  The
+                    # previous extension started at the groove's highest point;
+                    # when the pour hole ended lower down, that left a solid bridge
+                    # at the bottom of the hole and made the groove look clipped.
                     kc_top = float(kc.bounds[1, 1])
-                    if kc_top < y_max - 0.05:
-                        rad = np.array([math.sin(seam), 0.0, math.cos(seam)])
-                        near_top = kc.vertices[kc.vertices[:, 1] >= kc_top - 1.0]
-                        r_ext = max(float((near_top @ rad).max()) + 0.5, key_width)
-                        ext = key_slab(seam, kc_top - 1.0, y_max + 0.5, r_ext, key_width)
-                        kc = boolean([kc, ext], "union")
+                    hole_depth_for_keys = (
+                        max(1.0, min(100.0, float(fill_depth_percent))) / 100.0
+                    ) * (y_max - y_min)
+                    hole_bottom_y = y_max - hole_depth_for_keys
+                    rad = np.array([math.sin(seam), 0.0, math.cos(seam)])
+                    near_top = kc.vertices[kc.vertices[:, 1] >= kc_top - 1.0]
+                    r_ext = max(
+                        float((near_top @ rad).max()) + 0.5,
+                        hole_diameter / 2.0 + key_width + 1.0,
+                        key_width,
+                    )
+                    # Start below the pour-hole bottom so the slot positively
+                    # intersects the hole, rather than merely touching its edge.
+                    ext_y0 = max(
+                        base_top,
+                        min(kc_top - 1.0, hole_bottom_y - 1.0),
+                    )
+                    ext = key_slab(seam, ext_y0, y_max + 0.5, r_ext, key_width)
+                    kc = boolean([kc, ext], "union")
                     key_cuts[k] = kc
                     extra = boolean([kc, cutter], "difference")
                     if extra is not None and len(extra.faces):
