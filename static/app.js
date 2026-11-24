@@ -77,7 +77,7 @@ function fmt(v){return Number(v||0).toFixed(2);}
 
 // ---------------------------------------------------------------- settings
 // Mould settings persist in localStorage and travel inside project files.
-const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','wall_style','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','project_name'];
+const SETTING_FIELDS=['bed_x','bed_y','bed_z','filament_density','print_speed','layer_height','resin_density','silicone_density','style','panels','wall_style','margin','top_extra','wall','base','clearance','fill_diameter','fill_depth_percent','rim_width','rim_thickness','key_width','key_depth','project_name'];
 const SETTING_CHECKS=['core_enabled','label_tab'];
 const SETTINGS_KEY='madhat.settings.v1';
 function getSettings(){const s={};SETTING_FIELDS.forEach(id=>s[id]=$(id).value);SETTING_CHECKS.forEach(id=>s[id]=$(id).checked);return s;}
@@ -179,9 +179,13 @@ function renderStats(d){
     }
     showVol('capacity',d.capacity.total_ml,sil);
     showVol('mix',d.capacity.mix_ml,sil);
+    {const w=d.flat?null:d.capacity.min_wall_mm,el=$('thinWall');
+      if(w==null){el.textContent=dash;el.style.color='';$('thinWallNote').textContent=d.flat?'Not applicable to 2D flat pour moulds.':'Only estimated for the "follows the model" outer wall.';}
+      else{el.textContent=`~${w.toFixed(1)} mm`;el.style.color=w<2?'#ff6b6b':w<3?'#e0a030':'';
+        $('thinWallNote').textContent=`Thinnest spot is at ${d.capacity.min_wall_where}. Estimated from the outer wall, top and pour hole; flanges, rim groove and core bore are not included.`+(w<2?' Under ~2 mm may print poorly or break.':'');}}
   }else{
     $('flatDims').hidden=true;$('siliconeNote').textContent=NOTE_3D;
-    $('gapL').textContent='Gap around the model';$('channelL').textContent='Pour channel';
+    $('gapL').textContent='Gap around the model';$('channelL').textContent='Pour channel';$('thinWall').textContent=dash;$('thinWall').style.color='';
     ['gap','channel','capacity','mix'].forEach(id=>$(id).textContent=dash);
   }
 }
@@ -339,7 +343,7 @@ async function finishJob(j){
   }
 }
 $('generate').onclick=async()=>{
-  const d={style:$('style').value,panels:+$('panels').value,wall_style:$('wall_style').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
+  const d={style:$('style').value,panels:+$('panels').value,wall_style:$('wall_style').value,top_extra:+$('top_extra').value,wall:+$('wall').value,base:+$('base').value,clearance:+$('clearance').value,fill_diameter:+$('fill_diameter').value,fill_depth_percent:+$('fill_depth_percent').value,rim_width:+$('rim_width').value,rim_thickness:+$('rim_thickness').value,key_width:+$('key_width').value,key_depth:+$('key_depth').value,margin:+$('margin').value,label_tab:$('label_tab').checked,core:$('core_enabled').checked&&$('style').value!=='flat'};
   saveSettings();
   try{
     await post('/api/generate',d);

@@ -159,7 +159,9 @@ def capacity_of(gen):
     return {'gap_ml': gen.cavity_volume_mm3 / 1000,
             'channel_ml': gen.pour_channel_volume_mm3 / 1000,
             'total_ml': gen.total_resin_volume_mm3 / 1000,
-            'mix_ml': gen.total_resin_volume_mm3 * 1.1 / 1000}
+            'mix_ml': gen.total_resin_volume_mm3 * 1.1 / 1000,
+            'min_wall_mm': getattr(gen, 'min_wall_mm', None),
+            'min_wall_where': getattr(gen, 'min_wall_where', None)}
 
 
 def part_size_mm(mesh):
@@ -349,6 +351,8 @@ def parse_params(d):
         'fill_depth_percent': float(d.get('fill_depth_percent', 50)),
         'rim_width': float(d.get('rim_width', 2.5)),
         'rim_thickness': float(d.get('rim_thickness', 1.5)),
+        'key_width': float(d.get('key_width', 3.5)),
+        'key_depth': float(d.get('key_depth', 2.0)),
         'wall_style': d.get('wall_style', 'offset') if d.get('wall_style', 'offset') in ('offset', 'radial') else 'offset',
         'margin': float(d.get('margin', 10)),
         'label_tab': bool(d.get('label_tab', True)),
@@ -378,7 +382,8 @@ def run_job(job, source, p, rev):
                          fill_diameter=p['fill_diameter'],
                          fill_depth_percent=p['fill_depth_percent'], core=p['core'],
                          rim_width=p['rim_width'], rim_thickness=p['rim_thickness'],
-                         wall_style=p['wall_style'], progress=progress)
+                         wall_style=p['wall_style'], key_width=p['key_width'],
+                         key_depth=p['key_depth'], progress=progress)
         if job.cancel:
             raise JobCancelled()
         with LOCK:

@@ -276,7 +276,7 @@ def profile_radius(profile, angle, y, outer=False):
     return float(r0 * (1-yt) + r1 * yt)
 
 
-def offset_model(mesh, clearance, return_fields=False):
+def offset_model(mesh, clearance, return_fields=False, keep_sdf=False):
     """Build a robust outward offset from a filled voxel distance field.
 
     Vertex-normal offsets can fold over on dense, highly curved meshes, so the
@@ -349,6 +349,7 @@ def offset_model(mesh, clearance, return_fields=False):
                 "offset_volume": offset_volume,    # source + clearance
                 "pitch": float(pitch),
                 "origin": origin,
+                "sdf": sdf if keep_sdf else None,
             }
             return out, fields
         return out
@@ -750,6 +751,92 @@ def build_core(fields, top_y, fill_diameter, cap_height=3.0):
 
 
 # --- Uniform-thickness outer wall (offset envelope) -------------------------
+def surface_from_sdf(fields, level):
+    """Marching-cubes surface of an existing offset field at another distance.
+
+    Reuses the signed distance field from offset_model(..., keep_sdf=True), so a
+    deeper offset (e.g. the locating-key depth) costs no extra distance transform.
+    """
+    from skimage import measure
+    sdf = fields.get("sdf")
+    if sdf is None:
+        raise RuntimeError("Offset field was built without its distance field.")
+    pitch = float(fields["pitch"])
+    verts, faces, _n, _v = measure.marching_cubes(
+        sdf, level=float(level), spacing=(pitch, pitch, pitch))
+    out = trimesh.Trimesh(vertices=verts + np.asarray(fields["origin"], dtype=float),
+                          faces=faces, process=True)
+    out.remove_unreferenced_vertices()
+    out.fix_normals()
+    if not out.is_watertight or out.volume <= 0:
+        raise RuntimeError("The locating-key surface was not a closed solid.")
+    return out
+
+
+def key_slab(angle, y0, y1, radius, width):
+    """Box on the seam plane at `angle`: `width` wide across the seam, 0..radius out."""
+    t = np.array([math.cos(angle), 0.0, -math.sin(angle)])      # across the seam
+    rad = np.array([math.sin(angle), 0.0, math.cos(angle)])     # along the seam, outward
+    m = np.eye(4)
+    m[:3, 0], m[:3, 1], m[:3, 2] = t, [0.0, 1.0, 0.0], rad
+    m[:3, 3] = rad * radius / 2.0 + np.array([0.0, (y0 + y1) / 2.0, 0.0])
+    return trimesh.creation.box(extents=[float(width), float(y1 - y0), float(radius)], transform=m)
+
+
+def wall_thickness_estimate(fields, clearance, wall, y_top, hole_radius,
+                            hole_y0, boss=None):
+    """Estimate the thinnest part of the outer wall (mm) from the offset field.
+
+    Uses the signed distance field from offset_model(..., keep_sdf=True) run at
+    clearance + wall.  Every outer-surface voxel's distance to the cavity gives the
+    wall thickness there, so the offset wall reads as `wall` and anywhere the top is
+    cut flat below the offset surface reads thinner.  The pour hole adds a second
+    limit (distance from the outer surface to the hole).  Voxel quantisation means
+    the result is good to about +/- half a voxel (~0.25 mm).  Flanges, the rim
+    groove and the core bore are not included.
+    Returns {"min_mm", "y_src", "where", "pitch"} or None.
+    """
+    from scipy import ndimage
+    sdf = fields.get("sdf")
+    if sdf is None:
+        return None
+    pitch = float(fields["pitch"])
+    origin = np.asarray(fields["origin"], dtype=float)
+    nx, ny, nz = sdf.shape
+    cav = float(clearance) + 0.15            # cavity surface distance used by the cutter
+    env = np.asarray(fields["offset_volume"], dtype=bool).copy()
+    xs = origin[0] + np.arange(nx) * pitch
+    ys = origin[1] + np.arange(ny) * pitch
+    zs = origin[2] + np.arange(nz) * pitch
+    R = np.hypot(xs[:, None], zs[None, :])                    # (nx, nz)
+    env[:, ys > y_top + 1e-9, :] = False                      # flat top cut
+    if boss is not None:
+        ysel = (ys >= float(boss[1]) - 1e-9) & (ys <= y_top + 1e-9)
+        env[:, ysel, :] |= (R <= float(boss[0]))[:, None, :]
+    shell = env & ~ndimage.binary_erosion(env, border_value=0)
+    shell[:, ys < -1e-9, :] = False                           # only above the base
+    in_hole_y = ys >= float(hole_y0) - 1e-9
+    shell[:, in_hole_y, :] &= ~(R <= float(hole_radius) + 1.5 * pitch)[:, None, :]
+    sx, sy, sz = np.nonzero(shell)
+    if sx.size == 0:
+        return None
+    t_cav = sdf[sx, sy, sz].astype(float) - cav + 0.5 * pitch
+    # The pour hole limits only side-facing outer surface (a top-face voxel beside the
+    # hole opening is a lip, not a thin wall).
+    hole_side = in_hole_y[sy] & (ys[sy] < float(y_top) - 1.5 * pitch)
+    t_hole = np.where(hole_side, R[sx, sz] - float(hole_radius) + 0.5 * pitch, np.inf)
+    t = np.minimum(t_cav, t_hole)
+    i = int(np.argmin(t))
+    if t_hole[i] < t_cav[i]:
+        where = "around the pour hole"
+    elif ys[sy[i]] >= float(y_top) - 2.0 * pitch:
+        where = "the top face"
+    else:
+        where = "the side wall"
+    return {"min_mm": float(max(0.0, t[i])), "y_src": float(ys[sy[i]]),
+            "where": where, "pitch": pitch}
+
+
 def wedge_prism_arrays(a0, a1, y0, y1, radius):
     """Vertices/faces of a closed pie-slice prism (apex on the Y axis)."""
     n = max(4, int(math.ceil(abs(a1 - a0) / (math.pi / 72.0))))
@@ -949,11 +1036,14 @@ class MoldGenerator:
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = 0.0
         self.flat_stats = None  # filled by generate_flat_2d()
+        self.min_wall_mm = None       # thinnest outer wall estimate (offset wall only)
+        self.min_wall_where = None
         self.warnings: list[str] = []
 
     def generate(self, panels=4, top_extra=8, wall=8, base=6, clearance=3,
                  fill_diameter=12, fill_depth_percent=50, core=False, rim_width=2.5,
-                 rim_thickness=1.5, wall_style="offset", progress=None):
+                 rim_thickness=1.5, wall_style="offset", key_width=3.5, key_depth=2.0,
+                 progress=None):
         if self.source is None:
             raise ValueError("Load an STL first.")
         src = self.source.copy()
@@ -1020,12 +1110,19 @@ class MoldGenerator:
         # mould wall follows the model instead of a radial envelope.
         env_full = None
         env_radius = 0.0
+        # Locating keys: a vertical groove on the cavity surface along every seam, split
+        # between the two panels, so the cast silicone gets matching ribs that seat in the
+        # printed shell.  key_width is the finished slot width across the seam.
+        key_width = max(0.0, float(key_width))
+        key_depth = min(max(0.0, float(key_depth)), max(0.0, wall - 3.0))
+        key_on = key_width > 0.05 and key_depth > 0.05
+        key_deep = None
         if use_offset:
             if progress: progress("Building the uniform-thickness outer wall…", 0.24)
             hole_diameter = float(fill_diameter)
             if not np.isfinite(hole_diameter) or hole_diameter <= 0:
                 raise ValueError("Fill hole diameter must be a positive number.")
-            env, env_fields = offset_model(src, clearance + wall, return_fields=True)
+            env, env_fields = offset_model(src, clearance + wall, return_fields=True, keep_sdf=True)
             # The wall cannot rise above the offset solid's own top.
             y_max = min(y_max, base_top + float(env.bounds[1, 1]))
             pour_depth = (max(1.0, min(100.0, float(fill_depth_percent))) / 100.0) * (y_max - y_min)
@@ -1034,6 +1131,27 @@ class MoldGenerator:
             profile = envelope_profile(env_fields, wall, clearance, y_max - base_top,
                                        boss=(boss_r, (y_max - boss_h) - base_top))
             self.profile = profile
+            if key_on:
+                try:
+                    key_deep = surface_from_sdf(env_fields, clearance + 0.15 + key_depth)
+                except Exception:
+                    key_deep = None      # fall back to a separate offset below
+            try:
+                thin = wall_thickness_estimate(
+                    env_fields, clearance, wall, y_max - base_top, hole_diameter / 2.0,
+                    (y_max - pour_depth) - base_top, boss=(boss_r, (y_max - boss_h) - base_top))
+            except Exception:
+                thin = None            # the estimate is advisory; never fail the build over it
+            if thin is not None:
+                self.min_wall_mm = round(thin["min_mm"], 1)
+                self.min_wall_where = thin["where"]
+                if thin["min_mm"] < 2.0:
+                    self.warnings.append(
+                        f"Thin wall: about {thin['min_mm']:.1f} mm at {thin['where']} "
+                        "(estimate). Walls under ~2 mm may print poorly or break; "
+                        + ("raise Extra height above model or Wall thickness."
+                           if thin["where"] != "around the pour hole"
+                           else "use a smaller fill hole or a thicker wall."))
             env_fields = None
             env.apply_translation([0, base_top, 0])
             # Pour boss: keeps a solid collar around the sprue where the wall is thin.
@@ -1041,6 +1159,42 @@ class MoldGenerator:
             boss.apply_translation([0, y_max - boss_h / 2.0 + 0.5, 0])
             env_full = boolean([env, boss], "union")
             env_radius = float(np.hypot(env_full.vertices[:, 0], env_full.vertices[:, 2]).max()) + 5.0
+
+        key_cuts = [None] * max(1, int(panels))
+        self.key_volume_mm3 = 0.0
+        if key_on:
+            try:
+                if progress: progress("Cutting the locating keys…", 0.26)
+                if key_deep is None:
+                    key_deep = offset_model(src, clearance + key_depth)
+                key_deep.apply_translation([0, base_top, 0])
+                slab_r = float(np.hypot(key_deep.vertices[:, 0], key_deep.vertices[:, 2]).max()) + 5.0
+                for k in range(int(panels)):
+                    seam = k / panels * 2 * np.pi
+                    slab = key_slab(seam, base_top, y_max, slab_r, key_width)
+                    kc = boolean([key_deep, slab], "intersection")
+                    if kc is None or len(kc.faces) == 0:
+                        continue
+                    # The groove only follows the cavity surface, which ends a little above
+                    # the model.  Carry it straight up through the top of the mould as a
+                    # slot (same width) from the pour hole out to the end of the groove.
+                    kc_top = float(kc.bounds[1, 1])
+                    if kc_top < y_max - 0.05:
+                        rad = np.array([math.sin(seam), 0.0, math.cos(seam)])
+                        near_top = kc.vertices[kc.vertices[:, 1] >= kc_top - 1.0]
+                        r_ext = max(float((near_top @ rad).max()) + 0.5, key_width)
+                        ext = key_slab(seam, kc_top - 1.0, y_max + 0.5, r_ext, key_width)
+                        kc = boolean([kc, ext], "union")
+                    key_cuts[k] = kc
+                    extra = boolean([kc, cutter], "difference")
+                    if extra is not None and len(extra.faces):
+                        self.key_volume_mm3 += abs(float(extra.volume))
+                self.cavity_volume_mm3 += self.key_volume_mm3
+            except Exception as exc:
+                key_cuts = [None] * max(1, int(panels))
+                self.key_volume_mm3 = 0.0
+                self.warnings.append(f"Locating keys were skipped: {exc}")
+            key_deep = None
 
         # Calculate the pour channel's additional volume. The channel is
         # counted only where it lies outside the expanded model envelope,
@@ -1107,6 +1261,9 @@ class MoldGenerator:
             else:
                 blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
             panel=boolean([blank,cutter],"difference")
+            for seam in (i, (i + 1) % int(panels)):
+                if key_cuts[seam] is not None:
+                    panel = boolean([panel, key_cuts[seam]], "difference")
             if core_cut is not None:
                 # Bore the panel so the removable core passes through it.
                 panel=boolean([panel,core_cut],"difference")

@@ -92,7 +92,7 @@
       </details>
 
       <details class="fold" data-only="multi">
-        <summary>Fill hole and base rim</summary>
+        <summary>Fill hole, base rim and locating keys</summary>
         <div class="grid2">
           <label class="field"><span class="lbl">Fill hole diameter</span>
             <span class="inp"><input id="fill_diameter" type="number" value="12" min="0.1" step="0.5"><em>mm</em></span></label>
@@ -102,6 +102,10 @@
             <span class="inp"><input id="rim_width" type="number" value="2.5" min="0" max="6" step="0.5"><em>mm</em></span></label>
           <label class="field"><span class="lbl">Rim thickness</span>
             <span class="inp"><input id="rim_thickness" type="number" value="1.5" min="0.5" max="5" step="0.25"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Locating key width (0 = none)</span>
+            <span class="inp"><input id="key_width" type="number" value="3.5" min="0" max="10" step="0.5"><em>mm</em></span></label>
+          <label class="field"><span class="lbl">Locating key depth</span>
+            <span class="inp"><input id="key_depth" type="number" value="2" min="0.5" max="6" step="0.5"><em>mm</em></span></label>
         </div>
       </details>
 
@@ -143,6 +147,14 @@
       <label class="field"><span class="lbl">Silicone density (mixed)</span>
         <span class="inp"><input id="silicone_density" type="number" value="1.15" min="0.1" max="5" step="0.01"><em>g/mL</em></span></label>
       <p id="siliconeNote" class="muted small">Includes the silicone gap and pour channel without double-counting their overlap.</p>
+    </div>
+
+    <div class="group" id="wallGroup">
+      <h3>Mould wall</h3>
+      <dl class="stats">
+        <div class="stat"><dt>Thinnest wall (est.)</dt><dd id="thinWall">—</dd></div>
+      </dl>
+      <p id="thinWallNote" class="muted small">Estimated from the outer wall, top and pour hole. Flanges, rim groove and core bore are not included.</p>
     </div>
   </section>
 
