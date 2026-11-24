@@ -9,6 +9,8 @@ from engine import (MoldGenerator, transform_to_export, transform_to_preview,
                     transform_set_to_export)
 
 app = Flask(__name__)
+import vendor                      # three.js + font served locally (CDN fallback)
+vendor.register(app)
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
 MESH_EXTENSIONS = {'.stl', '.obj', '.3mf'}
@@ -183,7 +185,8 @@ def status():
     parts = []
     if S.generated:
         parts = [{'index': i, 'name': p.name, 'direction': list(p.direction),
-                  'size_mm': part_size_mm(p.mesh)}
+                  'size_mm': part_size_mm(p.mesh),
+                  'volume_mm3': abs(float(p.mesh.volume)) if p.mesh.is_watertight else 0.0}
                  for i, p in enumerate(S.generator.parts)]
     return jsonify({'ok': True, 'models': models, 'parts': parts, 'has_source': src is not None,
                     'generated': S.generated, 'source': mesh_info(src) if src is not None else None,
@@ -604,4 +607,7 @@ def project_open():
 if __name__ == '__main__':
     print('\nMAD HAT MOULDFORGE — Web Interface')
     print('Open http://127.0.0.1:5000 in your browser. Press Ctrl+C to stop.\n')
+    if vendor.missing():
+        print('Downloading the 3D viewer files once so the app can run offline...\n')
+    vendor.ensure_async()
     app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)

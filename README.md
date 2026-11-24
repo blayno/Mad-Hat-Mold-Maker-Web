@@ -64,6 +64,10 @@ Then open http://127.0.0.1:5000 manually.
 
 
 
+Needs internet for install and first startup, after that it runs locally
+
+
+
 Python can be found here
 https://github.com/coatl-dev/python3.12-windows 
 
