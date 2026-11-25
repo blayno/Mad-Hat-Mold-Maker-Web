@@ -575,6 +575,11 @@ def flange_seal_ring(angle, profile, y_min, y_max, base_top,
     return bead
 
 
+# Clearance (mm) on every side between the base lip and the matching groove
+# cut into the bottom of the mould walls.  Was 0.2 (too tight once printed).
+BASE_RIM_GAP = 0.5
+
+
 def base_tab_ring(profile, y_center, height, projection, clearance,
                   root=1.0, grow=0.0, segments=192):
     """Closed rectangular ring around the base's outer edge.
@@ -1365,13 +1370,13 @@ class MoldGenerator:
         rim_height=min(max(0.5,float(rim_thickness)),max(0.5,base-1.0)) if rim_on else 0.0
         # Base = fitted disc + a thin external rim fused around its edge at the
         # middle of the base thickness.  The same rim is Boolean-cut out of the
-        # bottom of every wall panel as a matching groove (0.2 mm clearance).
+        # bottom of every wall panel as a matching groove (BASE_RIM_GAP clearance).
         rim_cut=None
         if rim_on:
             mid_y=base_bottom+actual_base/2
             rim_ring=base_tab_ring(profile,mid_y,rim_height,rim_width,clearance)
             rim_cut=base_tab_ring(profile,mid_y,rim_height,rim_width,clearance,
-                                  root=1.5,grow=0.2)
+                                  root=1.5,grow=BASE_RIM_GAP)
             base_blank=boolean([base_blank,rim_ring],"union")
         base_mesh=base_blank
 
