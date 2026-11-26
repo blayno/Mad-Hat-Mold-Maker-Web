@@ -71,5 +71,8 @@ Needs internet for install and first startup, after that it runs locally
 Python can be found here
 https://github.com/coatl-dev/python3.12-windows 
 
+3mf to STL converter to convert non watertight models into STL which can be repaired and made watertight
+https://github.com/blayno/Mad-Hat-3mf-to-STL
+
 Files that arent watertight and need repair
 https://3dbuilder.org/
