@@ -262,6 +262,54 @@ def transform(index):
     return jsonify({'ok': True, 'tf': tf})
 
 
+@app.post('/api/center')
+@locked
+def center_all():
+    """Centre everything on the build plate (X/Z = 0) without regenerating.
+
+    The centre is taken from the generated mould (and plug) when there is one,
+    otherwise from the visible source. The models, the combined source and any
+    generated parts are all shifted by the same amount so they stay aligned.
+    """
+    if not S.models:
+        return err('Load at least one STL first.')
+    if S.generated and S.generator.parts:
+        meshes = [pt.mesh for pt in S.generator.parts]
+        if S.generator.plug is not None:
+            meshes.append(S.generator.plug)
+    elif S.generator.source is not None:
+        meshes = [S.generator.source]
+    else:
+        meshes = [m['mesh'] for m in S.models]
+    lo = np.min([m.bounds[0] for m in meshes], axis=0)
+    hi = np.max([m.bounds[1] for m in meshes], axis=0)
+    dx, dz = -float(lo[0] + hi[0]) / 2.0, -float(lo[2] + hi[2]) / 2.0
+    if abs(dx) < 1e-9 and abs(dz) < 1e-9:
+        return jsonify({'ok': True, 'moved': [0.0, 0.0]})
+    shift = [dx, 0.0, dz]
+    for m in S.models:
+        m['mesh'].apply_translation(shift)
+        if m.get('applied'):
+            # apply_tf positions from the origin using tf['move'] (engine z = -move Y)
+            m['tf']['move'][0] += dx
+            m['tf']['move'][1] -= dz
+        else:
+            m['base'].apply_translation(shift)
+        m['info'] = None
+    if S.generated:
+        # Keep the generated mould: shift it by the same amount instead of rebuilding.
+        if S.generator.source is not None:
+            S.generator.source.apply_translation(shift)
+        if S.generator.plug is not None:
+            S.generator.plug.apply_translation(shift)
+        for pt in S.generator.parts:
+            pt.mesh.apply_translation(shift)
+        S.rev += 1
+    else:
+        rebuild_source()
+    return jsonify({'ok': True, 'moved': [dx, -dz]})
+
+
 @app.post('/api/model/<int:index>/visibility')
 @locked
 def visibility(index):

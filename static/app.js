@@ -210,7 +210,7 @@ async function refreshStatus(){
   $('modelInfo').textContent=d.models.length?`${d.models.length} model${d.models.length===1?'':'s'} loaded, ${visible} visible`:'No model loaded yet.';
   $('empty').hidden=d.models.length>0;
   $('generate').disabled=!d.has_source||generating;
-  ['saveProject','deleteAll','showAll','deleteSelected','duplicate'].forEach(id=>$(id).disabled=!d.models.length);
+  ['saveProject','deleteAll','showAll','deleteSelected','duplicate','centerMould'].forEach(id=>$(id).disabled=!d.models.length);
   lastStatus=d;renderStats(d);updateCutPlanes();
   if(d.generated){
     await renderParts(d.parts);
@@ -511,6 +511,14 @@ async function applyTransform(){
   finally{transformBusy=false;}
 }
 transformIds.forEach(id=>$(id).addEventListener('input',()=>{if($('uniform').checked&&['sx','sy','sz'].includes(id)){['sx','sy','sz'].forEach(k=>$(k).value=$(id).value);}clearTimeout(transformTimer);transformTimer=setTimeout(applyTransform,180);}));
+$('centerMould').onclick=async()=>{
+  if(!modelData.length)return;
+  try{
+    await post('/api/center',{});
+    await refreshStatus();await refreshSource();syncTransformFields();fitCamera();
+    $('transformStatus').textContent='Mould and models centred on the build plate.';$('transformStatus').dataset.kind='ok';
+  }catch(e){$('transformStatus').textContent='Centre failed. '+e.message;$('transformStatus').dataset.kind='error';}
+};
 $('resetTransform').onclick=()=>{transformIds.forEach(id=>$(id).value=(id[0]==='s'?1:0));applyTransform();};
 
 // ------------------------------------------------------------------ project
