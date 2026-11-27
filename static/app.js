@@ -50,7 +50,17 @@ function mat(color,rough=.7){return new THREE.MeshStandardMaterial({color,roughn
 function clearParts(){for(const m of partMeshes){scene.remove(m);m.geometry.dispose();}partMeshes=[];partData=[];}
 
 // Preview the exact radial split planes used by the geometry engine.
-function clearCutPlanes(){for(const m of cutPlaneMeshes){scene.remove(m);m.geometry.dispose();m.material.dispose();}cutPlaneMeshes=[];}
+function clearCutPlanes(){for(const m of cutPlaneMeshes){scene.remove(m);m.traverse(child=>{if(child.geometry)child.geometry.dispose();if(child.material){const materials=Array.isArray(child.material)?child.material:[child.material];materials.forEach(material=>{if(material.map)material.map.dispose();material.dispose();});}});}cutPlaneMeshes=[];}
+function makeCutPlaneLabel(text,size){
+  const canvas=document.createElement('canvas');canvas.width=256;canvas.height=128;
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='rgba(17,24,33,0.94)';ctx.strokeStyle='#f0a500';ctx.lineWidth=8;
+  ctx.beginPath();ctx.roundRect(8,8,240,112,22);ctx.fill();ctx.stroke();
+  ctx.fillStyle='#ffffff';ctx.font='bold 68px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,128,66);
+  const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;
+  const label=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:false,depthWrite:false}));
+  const width=Math.max(12,Math.min(26,size*0.13));label.scale.set(width,width*0.5,1);label.renderOrder=20;return label;
+}
 function cutPlaneOffsets(){
   try{const a=JSON.parse($('cut_offsets')?.value||'[]');return Array.isArray(a)?a.map(v=>Array.isArray(v)?[Number(v[0])||0,Number(v[1])||0]:[0,0]):[];}catch(e){return [];}
 }
@@ -69,13 +79,13 @@ function syncCutPlaneControls(){
   $('cut_offsets').value=JSON.stringify(offsets);
   const box=$('cutPlaneControls');box.innerHTML='';
   offsets.forEach((v,i)=>{
-    const group=document.createElement('div');group.className='field';
-    const title=document.createElement('span');title.className='lbl';title.textContent=`Plane ${i+1} position`;
-    const row=document.createElement('div');row.className='grid2';
+    const group=document.createElement('div');group.className='field cut-plane-card';
+    const title=document.createElement('span');title.className='lbl cut-plane-title';title.textContent=`Plane ${i+1} position`;
+    const row=document.createElement('div');row.className='cut-plane-axis-grid';
     [['X',0],['Y',1]].forEach(([axis,idx])=>{
-      const wrap=document.createElement('label');wrap.className='field';
+      const wrap=document.createElement('label');wrap.className='field cut-plane-axis';
       const lbl=document.createElement('span');lbl.className='lbl';lbl.textContent=axis+' movement';
-      const inp=document.createElement('span');inp.className='inp';
+      const inp=document.createElement('span');inp.className='inp cut-plane-value';
       const input=document.createElement('input');input.type='number';input.step='0.5';input.min='-200';input.max='200';input.value=(v[idx]||0).toFixed(1);input.setAttribute('aria-label',`Plane ${i+1} ${axis} movement in mm`);
       const unit=document.createElement('em');unit.textContent='mm';
       input.addEventListener('input',()=>{const next=cutPlaneOffsets();next[i][idx]=Math.max(-200,Math.min(200,Number(input.value)||0));$('cut_offsets').value=JSON.stringify(next);refreshCutPlanePositions();saveSettings();});
@@ -94,10 +104,12 @@ function updateCutPlanes(){
   if(!sourceMesh||generated||flatMode||$('style')?.value!=='multi'||!$('showCutPlanes')?.checked)return;
   const angles=cutAnglesDegrees(),count=angles.length;
   const box=new THREE.Box3().setFromObject(sourceMesh),size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
-  const radius=Math.max(size.x,size.y,size.z,10)*1.25;
-  const base=Math.max(0,Number($('base')?.value)||6),extra=Math.max(0,Number($('top_extra')?.value)||8);
-  const height=size.z+base+extra;
-  const planeCenter=new THREE.Vector3(center.x,center.y,(box.min.z+box.max.z+extra+base)/2);
+  // Size each plane from the STL bounds, with a fixed 20 mm overhang
+  // beyond the model on every side (rather than a large global radius).
+  const overhang=20;
+  // Keep the lower edge aligned with the STL base/grid; only extend 20 mm above it.
+  const planeHeight=size.z+overhang;
+  const planeCenter=new THREE.Vector3(center.x,center.y,box.min.z+planeHeight/2);
   const offsets=cutPlaneOffsets();
   const material=new THREE.MeshBasicMaterial({color:0xff2525,transparent:true,opacity:.24,side:THREE.DoubleSide,depthWrite:false});
   for(let i=0;i<count;i++){
@@ -106,10 +118,17 @@ function updateCutPlanes(){
     const vertical=new THREE.Vector3(0,0,1);
     const normal=new THREE.Vector3().crossVectors(radial,vertical).normalize();
     const basis=new THREE.Matrix4().makeBasis(radial,vertical,normal);
-    const mesh=new THREE.Mesh(new THREE.PlaneGeometry(radius*2,height),material.clone());
+    const halfSpan=Math.abs(radial.x)*size.x/2+Math.abs(radial.y)*size.y/2;
+    const planeWidth=(halfSpan+overhang)*2;
+    const mesh=new THREE.Mesh(new THREE.PlaneGeometry(planeWidth,planeHeight),material.clone());
     mesh.quaternion.setFromRotationMatrix(basis);
     const v=offsets[i]||[0,0];mesh.position.copy(planeCenter).add(new THREE.Vector3(v[0],v[1],0));
-    mesh.renderOrder=5;mesh.userData.cutPlaneIndex=i;scene.add(mesh);cutPlaneMeshes.push(mesh);
+    mesh.renderOrder=5;mesh.userData.cutPlaneIndex=i;
+    const label=makeCutPlaneLabel(`P${i+1}`,Math.max(size.x,size.y));
+    // Keep each identifier out at the positive radial end of its own plane,
+    // clear of the model and away from the cluster of intersecting plane centres.
+    label.position.set(planeWidth/2-label.scale.x*0.65,0,1.2);mesh.add(label);
+    scene.add(mesh);cutPlaneMeshes.push(mesh);
   }
 }
 
@@ -211,6 +230,7 @@ async function refreshStatus(){
   $('empty').hidden=d.models.length>0;
   $('generate').disabled=!d.has_source||generating;
   ['saveProject','deleteAll','showAll','deleteSelected','duplicate','centerMould'].forEach(id=>$(id).disabled=!d.models.length);
+  $('deleteMould').disabled=!d.generated||generating;
   lastStatus=d;renderStats(d);updateCutPlanes();
   if(d.generated){
     await renderParts(d.parts);
@@ -481,6 +501,7 @@ $('exportExploded').onclick=attempt('export the exploded mould',()=>saveAs(`${pr
 $('exportPlug').onclick=attempt('export the base and STL',()=>saveAs(`${projectBase()}_base_and_STL.stl`,'model/stl',()=>fetchBlob('/api/export/plug')));
 
 // ------------------------------------------------------------ model actions
+$('deleteMould').onclick=async()=>{if(!generated)return;if(!confirm('Delete the generated mould only? Your imported STL models and cutting-plane settings will be kept.'))return;try{$('deleteMould').disabled=true;await api('/api/mould',{method:'DELETE'});await refreshStatus();await refreshSource();status('Mould deleted. Your STL is ready to be cut again.','ok');}catch(e){toast('Could not delete mould',e.message,'error');await refreshStatus();}};
 $('deleteAll').onclick=async()=>{if(!confirm('Delete all imported STL models and generated parts?'))return;await api('/api/models',{method:'DELETE'});activeModel=0;await refreshStatus();await refreshSource();syncTransformFields();status('All models deleted.');};
 $('showAll').onclick=async()=>{await post('/api/models/show-all',{});await refreshStatus();await refreshSource();};
 $('deleteSelected').onclick=async()=>{if(!modelData.length)return;await api(`/api/model/${activeModel}`,{method:'DELETE'});await refreshStatus();await refreshSource();syncTransformFields();};

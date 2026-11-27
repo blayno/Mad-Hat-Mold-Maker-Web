@@ -186,10 +186,16 @@ def status():
     src = S.generator.source
     parts = []
     if S.generated:
-        parts = [{'index': i, 'name': p.name, 'direction': list(p.direction),
-                  'size_mm': part_size_mm(p.mesh),
-                  'volume_mm3': abs(float(p.mesh.volume)) if p.mesh.is_watertight else 0.0}
-                 for i, p in enumerate(S.generator.parts)]
+        for i, p in enumerate(S.generator.parts):
+            # The exported Mold_Base STL contains the positioned source plug as
+            # well as the mould base. Use that same combined mesh for print
+            # statistics so filament weight, time and bed-fit include both.
+            # In the one-piece/flat mould case base_and_source_mesh() already
+            # returns the fused part, so the source is not counted twice.
+            stat_mesh = base_and_source_mesh() if p.name == 'Mold_Base' else p.mesh
+            parts.append({'index': i, 'name': p.name, 'direction': list(p.direction),
+                          'size_mm': part_size_mm(stat_mesh),
+                          'volume_mm3': abs(float(stat_mesh.volume)) if stat_mesh.is_watertight else 0.0})
     return jsonify({'ok': True, 'models': models, 'parts': parts, 'has_source': src is not None,
                     'generated': S.generated, 'source': mesh_info(src) if src is not None else None,
                     'flat': (S.generator.flat_stats if S.generated else None),
@@ -349,6 +355,23 @@ def delete_model(index):
 def delete_all_models():
     S.models.clear()
     rebuild_source()
+    return jsonify({'ok': True})
+
+
+@app.delete('/api/mould')
+@locked
+def delete_generated_mould():
+    """Discard generated mould parts while keeping all imported source models."""
+    global JOB
+    if JOB is not None and JOB.state == 'running':
+        JOB.cancel = True
+        JOB.cancel_reason = 'user'
+    source = S.generator.source
+    fresh = MoldGenerator()
+    fresh.source = source
+    S.generator = fresh
+    S.generated = False
+    S.rev += 1
     return jsonify({'ok': True})
 
 

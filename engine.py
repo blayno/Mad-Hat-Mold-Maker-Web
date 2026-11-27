@@ -1151,11 +1151,42 @@ class MoldGenerator:
                 raise ValueError("A cut plane has been moved too far from the model centre.")
         seam_offsets = ([plane_positions[i % plane_count] for i in range(panels)]
                         if panels % 2 == 0 else list(plane_positions))
-        # The wall envelope, pour hole and panels are all built around the
-        # vertical axis through the origin, so centre the (possibly multi-model)
-        # source on its bounding box and sit it on Y=0.
+        # Find the common intersection of the movable vertical cut planes.
+        # Each plane is n.x * X + n.z * Z = offset, where
+        # n = (cos(angle), -sin(angle)). For more than two planes, use the
+        # least-squares intersection so all seams remain as close as possible
+        # to one shared centre.
+        plane_normals = np.asarray([
+            [math.cos(seam_angles[i]), -math.sin(seam_angles[i])]
+            for i in range(plane_count)
+        ], dtype=float)
+        plane_rhs = np.asarray([
+            math.cos(seam_angles[i]) * plane_positions[i][0]
+            - math.sin(seam_angles[i]) * plane_positions[i][1]
+            for i in range(plane_count)
+        ], dtype=float)
+        try:
+            intersection_xz = np.linalg.lstsq(plane_normals, plane_rhs, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            intersection_xz = np.zeros(2, dtype=float)
+        if not np.all(np.isfinite(intersection_xz)):
+            raise ValueError("The cutting planes do not have a valid intersection.")
+        # Rebase the entire mould around the cutting-plane intersection.
+        # This makes the base, pour boss, fill hole, cavity keys, core and all
+        # other centre-referenced mould features follow the moved planes.
+        # The source itself is shifted oppositely, keeping the original model
+        # in its original world position inside the newly centred mould.
+        seam_offsets = [
+            (float(p[0] - intersection_xz[0]),
+             float(p[1] - intersection_xz[1]))
+            for p in seam_offsets
+        ]
         bb = src.bounds
-        src.apply_translation([-(bb[0,0]+bb[1,0])/2.0, -bb[0,1], -(bb[0,2]+bb[1,2])/2.0])
+        src.apply_translation([
+            -(bb[0,0]+bb[1,0])/2.0 - float(intersection_xz[0]),
+            -bb[0,1],
+            -(bb[0,2]+bb[1,2])/2.0 - float(intersection_xz[1])
+        ])
         size = src.extents
         if np.any(size <= 0):
             raise ValueError("The STL has invalid or zero dimensions.")

@@ -7,6 +7,17 @@
 .chips>*{flex:1;min-width:0}
 .chips>select{flex:2}
 .chips button.selected{box-shadow:inset 0 0 0 2px currentColor;font-weight:600}
+/* Give each cutting plane its own full-width row so the numeric controls stay readable. */
+#cutPlaneControls{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin:10px 0 12px}
+#cutPlaneControls .cut-plane-card{display:block;min-width:0;margin:0;padding:10px;background:#171d25;border:1px solid #3a4653;border-radius:8px}
+#cutPlaneControls .cut-plane-title{display:block;margin:0 0 8px;font-size:13px;font-weight:700;color:#f0a500;letter-spacing:.02em}
+#cutPlaneControls .cut-plane-axis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+#cutPlaneControls .cut-plane-axis{display:block;min-width:0;margin:0}
+#cutPlaneControls .cut-plane-axis .lbl{display:block;margin:0 0 5px;font-size:12px}
+#cutPlaneControls .cut-plane-value{display:flex;align-items:center;gap:6px;min-width:0;width:100%;box-sizing:border-box}
+#cutPlaneControls .cut-plane-value input{display:block;min-width:0;width:100%;height:40px;box-sizing:border-box;padding:7px 9px;font-size:16px;font-variant-numeric:tabular-nums}
+#cutPlaneControls .cut-plane-value em{flex:0 0 auto;font-size:12px}
+@media(max-width:420px){ #cutPlaneControls .cut-plane-axis-grid{gap:7px}#cutPlaneControls .cut-plane-card{padding:8px}}
 </style>
 <script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script></head>
 <body data-style="multi"><div class="app">
@@ -34,7 +45,10 @@
       <div class="row3">
         <button id="saveProject" disabled>Save project</button>
         <label class="button">Open project<input id="openProject" type="file" accept=".zip" hidden></label>
-        <button id="deleteAll" class="danger" disabled>Delete all</button>
+        <div style="display:flex;gap:6px;min-width:0">
+          <button id="deleteMould" class="danger" disabled style="flex:1;min-width:0">Delete mould</button>
+          <button id="deleteAll" class="danger" disabled style="flex:1;min-width:0">Delete all</button>
+        </div>
       </div>
     </div>
 
@@ -49,6 +63,17 @@
         <label class="field"><span class="lbl">Layer height</span><span class="inp"><input id="layer_height" type="number" value="0.2" min="0.05" max="1" step="0.05"><em>mm</em></span></label>
       </div>
       <p class="muted small">Default bed is 220 × 220 × 250 mm (Ender 3). Estimates assume a 0.4 mm nozzle and include 30% allowance for travel, walls and infill. Actual slicer times will vary.</p>
+    </div>
+
+    <div class="group" data-only="multi">
+      <h3>3D mould cut plane settings</h3>
+      <div class="field" style="border:1px solid #444;border-radius:8px;padding:10px">
+        <label class="check" style="margin:8px 0"><input id="showCutPlanes" type="checkbox" checked><span>Show red cut planes on STL preview<small>Visual guide only. The preview remains dedicated to camera orbit, pan and zoom.</small></span></label>
+        <span class="lbl">Plane positions · millimetres</span>
+        <div id="cutPlaneControls" class="grid2"></div>
+        <input id="cut_offsets" type="hidden" value="">
+        <small class="muted">Move each plane using the X and Y settings above. Do not drag the planes in the visualiser. The generated 3D mould uses these exact positions.</small>
+      </div>
     </div>
 
     <div class="group">
@@ -67,14 +92,6 @@
           <select id="panels"><option>2</option><option selected>4</option><option>6</option><option>8</option></select></label>
         <label class="field" data-only="multi"><span class="lbl">Outer wall</span>
           <select id="wall_style"><option value="offset" selected>Follows the model (uniform thickness)</option><option value="radial">Round envelope (legacy)</option></select></label>
-        <div class="field" data-only="multi" style="grid-column:1/-1;border:1px solid #444;border-radius:8px;padding:10px;margin-top:6px">
-          <span class="lbl">3D mould cut plane settings</span>
-          <label class="check" style="margin:8px 0"><input id="showCutPlanes" type="checkbox" checked><span>Show red cut planes on STL preview<small>Visual guide only. The preview remains dedicated to camera orbit, pan and zoom.</small></span></label>
-          <span class="lbl">Plane positions · millimetres</span>
-          <div id="cutPlaneControls" class="grid2"></div>
-          <input id="cut_offsets" type="hidden" value="">
-          <small class="muted">Move each plane using the X and Y settings above. Do not drag the planes in the visualiser. The generated 3D mould uses these exact positions.</small>
-        </div>
         <label class="field" data-only="flat"><span class="lbl">Margin around model</span>
           <span class="inp"><input id="margin" type="number" value="10" min="2" max="100" step="1"><em>mm</em></span></label>
       </div>
